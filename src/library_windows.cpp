@@ -1,5 +1,6 @@
 #include "library_windows.hpp"
 #include "import_windows.hpp"
+#include "theme_windows.hpp"
 #include "nso_album_sync/local_data.hpp"
 #include "nso_album_sync/path.hpp"
 #include "nso_album_sync/util.hpp"
@@ -21,9 +22,6 @@
 namespace nso {
 namespace {
 constexpr wchar_t kClass[] = L"CaptureDockAlbumTools";
-constexpr COLORREF kInk = RGB(34, 25, 31);
-constexpr COLORREF kPaper = RGB(250, 243, 244);
-constexpr COLORREF kRed = RGB(196, 9, 43);
 constexpr UINT kApplySelection = WM_APP + 72;
 enum Control { Library = 3000, History, Storage, Duplicates, Title, Search, NewCaptures, Game, Date, Type, Favorites,
                Collections, CollectionName, SaveCollection, DeleteCollection, Runs, Rows, Preview,
@@ -206,9 +204,9 @@ struct WindowsLibrary::Impl {
     UINT dpi = 96;
     HFONT body = nullptr;
     HFONT title = nullptr;
-    HBRUSH paper = CreateSolidBrush(kPaper);
-    HBRUSH ink = CreateSolidBrush(kInk);
-    HBRUSH red = CreateSolidBrush(kRed);
+    HBRUSH paper = theme::brush(theme::kBackground);
+    HBRUSH ink = theme::brush(theme::kPreview);
+    HBRUSH red = theme::brush(theme::kRed);
     Imaging imaging;
     std::unique_ptr<Gdiplus::Image> image;
     std::unique_ptr<Gdiplus::Image> incoming_image;
@@ -220,9 +218,6 @@ struct WindowsLibrary::Impl {
         if (window) DestroyWindow(window);
         if (body) DeleteObject(body);
         if (title) DeleteObject(title);
-        DeleteObject(paper);
-        DeleteObject(ink);
-        DeleteObject(red);
         if (com) CoUninitialize();
     }
     HWND get(Control id) const { return controls[id - Library]; }
@@ -298,6 +293,8 @@ struct WindowsLibrary::Impl {
         button(CopyFiles, L"Copy selected files");
         make(Status, L"STATIC", L"", SS_NOPREFIX);
         fonts();
+        theme::apply(window, theme::Caption::red);
+        theme::set_primary(get(Action));
     }
     void fonts() {
         const auto old_body = body;
@@ -324,12 +321,12 @@ struct WindowsLibrary::Impl {
         place(History, 156, 67, 108, 30);
         place(Storage, 274, 67, 96, 30);
         place(Duplicates, 380, 67, 150, 30);
-        place(Search, 20, 109, width - 211, 26);
-        place(NewCaptures, width - 181, 109, 161, 26);
-        place(Game, 20, 145, width - 374, 230);
-        place(Date, width - 344, 145, 116, 175);
-        place(Type, width - 218, 145, 105, 170);
-        place(Favorites, width - 103, 143, 88, 27);
+        place(Search, 20, 109, width - 241, 26);
+        place(NewCaptures, width - 211, 109, 196, 26);
+        place(Game, 20, 145, width - 404, 230);
+        place(Date, width - 374, 145, 116, 175);
+        place(Type, width - 248, 145, 105, 170);
+        place(Favorites, width - 133, 143, 118, 27);
         place(Collections, 20, 181, width - 379, 220);
         place(CollectionName, width - 349, 181, 150, 26);
         place(SaveCollection, width - 189, 180, 96, 27);
@@ -353,9 +350,9 @@ struct WindowsLibrary::Impl {
         place(Play, panel_x, 226 + preview_height, 67, 27);
         place(Stop, panel_x + 76, 226 + preview_height, 67, 27);
         place(Tags, panel_x, 256 + preview_height, panel, 27);
-        place(Save, panel_x, 286 + preview_height, 78, 27);
-        place(Favorite, panel_x + 85, 286 + preview_height, panel - 85, 27);
-        place(Status, 20, height - 69, width - 40, 21);
+        place(Save, panel_x, 286 + preview_height, 96, 27);
+        place(Favorite, panel_x + 104, 286 + preview_height, panel - 104, 27);
+        place(Status, 20, height - 69, library() ? panel_x - 34 : width - 40, 21);
         place(Action, 20, height - 39, 177, 29);
         place(KeepExisting, 207, height - 39, 151, 29);
         place(Refresh, duplicates() ? 368 : 207, height - 39, 86, 29);
@@ -805,7 +802,7 @@ struct WindowsLibrary::Impl {
         if (!still) {
             const auto* capture = selected_capture();
             SetBkMode(draw.hDC, TRANSPARENT);
-            SetTextColor(draw.hDC, RGB(255, 235, 239));
+            SetTextColor(draw.hDC, theme::kMuted);
             const auto* caption = duplicates() ? (selected_match() ? L"Open file to view" : L"Select a match") :
                 ListView_GetSelectedCount(get(Rows)) > 1 ? L"Multiple captures selected" :
                 !capture ? L"Select a capture" : capture->video ? L"Press Play to preview" : L"Preview unavailable";
@@ -837,10 +834,11 @@ struct WindowsLibrary::Impl {
         set(Title, library() ? L"Capture library" : history() ? L"Sync history" :
             duplicates() ? L"Duplicate review" : L"Album storage");
         set(Action, library() ? L"Open file" : history() ? L"Retry selected capture" : L"Open game folder");
-        enable(Library, !library());
-        enable(History, !history());
-        enable(Storage, page != LibraryPage::storage);
-        enable(Duplicates, !duplicates());
+        // The current page shows as the red tab rather than a disabled button.
+        theme::set_primary(get(Library), library());
+        theme::set_primary(get(History), history());
+        theme::set_primary(get(Storage), page == LibraryPage::storage);
+        theme::set_primary(get(Duplicates), duplicates());
         if (library()) columns({{L"Capture", 213}, {L"Game", 125}, {L"Date", 95}, {L"Type", 94}});
         else if (history()) columns({{L"Capture", 485}, {L"Result", 150}});
         else if (duplicates()) columns({{L"Album copy", 318}, {L"Incoming copy", 318}});
@@ -899,11 +897,26 @@ struct WindowsLibrary::Impl {
             }
             case WM_CTLCOLORSTATIC: {
                 const auto dc = reinterpret_cast<HDC>(wp);
-                const bool heading = reinterpret_cast<HWND>(lp) == get(Title);
-                SetBkMode(dc, TRANSPARENT);
-                SetTextColor(dc, high_contrast() ? GetSysColor(COLOR_WINDOWTEXT) : heading ? RGB(255, 255, 255) : kInk);
-                return reinterpret_cast<LRESULT>(high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : heading ? red : paper);
+                const auto child = reinterpret_cast<HWND>(lp);
+                if (high_contrast()) {
+                    SetBkMode(dc, TRANSPARENT);
+                    SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+                    return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+                }
+                if (child == get(Title)) {
+                    SetBkMode(dc, TRANSPARENT);
+                    SetTextColor(dc, RGB(255, 255, 255));
+                    return reinterpret_cast<LRESULT>(red);
+                }
+                const auto result = theme::control_color(msg, wp, lp, theme::kBackground);
+                if (child == get(Status)) SetTextColor(dc, theme::kMuted);
+                return result;
             }
+            case WM_CTLCOLORBTN:
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
+                if (const auto brush = theme::control_color(msg, wp, lp, theme::kBackground)) return brush;
+                break;
             case WM_DRAWITEM:
                 if (wp == Preview || wp == IncomingPreview) {
                     draw_preview(*reinterpret_cast<const DRAWITEMSTRUCT*>(lp));
@@ -931,10 +944,10 @@ struct WindowsLibrary::Impl {
             case WM_COMMAND:
                 if (updating) return 0;
                 switch (LOWORD(wp)) {
-                    case Library: switch_page(LibraryPage::captures); break;
-                    case History: switch_page(LibraryPage::history); break;
-                    case Storage: switch_page(LibraryPage::storage); break;
-                    case Duplicates: switch_page(LibraryPage::duplicates); break;
+                    case Library: if (!library()) switch_page(LibraryPage::captures); break;
+                    case History: if (!history()) switch_page(LibraryPage::history); break;
+                    case Storage: if (page != LibraryPage::storage) switch_page(LibraryPage::storage); break;
+                    case Duplicates: if (!duplicates()) switch_page(LibraryPage::duplicates); break;
                     case Search: if (HIWORD(wp) == EN_CHANGE) SetTimer(window, 1, 150, nullptr); break;
                     case Game:
                         if (HIWORD(wp) == CBN_SELCHANGE) {

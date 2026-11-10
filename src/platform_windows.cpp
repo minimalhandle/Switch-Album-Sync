@@ -4,6 +4,7 @@
 #include "dashboard_windows.hpp"
 #include "import_windows.hpp"
 #include "library_windows.hpp"
+#include "theme_windows.hpp"
 #include "nso_album_sync/windows_compat.hpp"
 #include <shellapi.h>
 #include <shobjidl.h>
@@ -137,7 +138,16 @@ private:
     DPI_AWARENESS_CONTEXT previous_;
 };
 
-LRESULT dialog_color(UINT msg, WPARAM wp) {
+HFONT dialog_font() {
+    // Dialogs run DPI-unaware with GDI scaling, so a fixed 96 DPI size is right.
+    static const HFONT font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+    return font ? font : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+}
+
+LRESULT dialog_color(UINT msg, WPARAM wp, LPARAM lp) {
+    if (const auto themed = theme::control_color(msg, wp, lp, theme::kBackground)) return themed;
     if (msg == WM_CTLCOLORSTATIC) {
         auto dc = reinterpret_cast<HDC>(wp);
         SetBkMode(dc, TRANSPARENT);
@@ -205,7 +215,7 @@ HWND make_control(
         SendMessageW(
             control,
             WM_SETFONT,
-            reinterpret_cast<WPARAM>(GetStockObject(DEFAULT_GUI_FONT)),
+            reinterpret_cast<WPARAM>(dialog_font()),
             TRUE);
     }
     return control;
@@ -215,7 +225,7 @@ int measure_text_height(const std::wstring& text, int width) {
     HDC dc = GetDC(nullptr);
     if (dc == nullptr) return 180;
 
-    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    HFONT font = dialog_font();
     HGDIOBJ previous = SelectObject(dc, font);
     RECT bounds{0, 0, width, 0};
     DrawTextW(
@@ -238,8 +248,8 @@ LRESULT CALLBACK prompt_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
 
-    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLOREDIT) {
-        return dialog_color(msg, wp);
+    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORBTN) {
+        return dialog_color(msg, wp, lp);
     }
 
     if (state && msg == WM_COMMAND) {
@@ -269,8 +279,8 @@ LRESULT CALLBACK disclosure_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
     }
 
-    if (msg == WM_CTLCOLORSTATIC) {
-        return dialog_color(msg, wp);
+    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
+        return dialog_color(msg, wp, lp);
     }
 
     if (state && msg == WM_COMMAND) {
@@ -311,7 +321,7 @@ std::string prompt_box(
     wc.hInstance = instance;
     wc.hIcon = app_icon();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.hbrBackground = theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kBackground);
     wc.lpszClassName = kPromptClass;
     RegisterClassW(&wc);
 
@@ -383,6 +393,7 @@ std::string prompt_box(
         IDCANCEL);
 
     if (owner) EnableWindow(owner, FALSE);
+    theme::apply(window);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
     if (state.edit != nullptr) {
@@ -435,7 +446,7 @@ bool disclosure_box(const std::string& title, const std::string& text, HWND owne
     wc.hInstance = instance;
     wc.hIcon = app_icon();
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    wc.hbrBackground = theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kBackground);
     wc.lpszClassName = kDisclosureClass;
     RegisterClassW(&wc);
 
@@ -517,6 +528,7 @@ bool disclosure_box(const std::string& title, const std::string& text, HWND owne
         IDCANCEL);
 
     if (owner) EnableWindow(owner, FALSE);
+    theme::apply(window);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
 
@@ -829,6 +841,7 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
     impl_->callbacks = callbacks;
     g_ui = impl_;
     SetCurrentProcessExplicitAppUserModelID(L"minimalhandle.CaptureDock");
+    theme::init_process();
 
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};

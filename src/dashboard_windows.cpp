@@ -1,5 +1,6 @@
 #include "dashboard_windows.hpp"
 #include "library_windows.hpp"
+#include "theme_windows.hpp"
 #include <gdiplus.h>
 
 #include <commctrl.h>
@@ -26,7 +27,7 @@ constexpr UINT_PTR kFeedbackTimer = 1;
 constexpr int kWidth = 704;
 constexpr int kMinimumWidth = 610;
 constexpr int kHeight = 684;
-constexpr int kDiscordSettingsHeight = 184;
+constexpr int kDiscordSettingsHeight = 212;
 constexpr int kMargin = 24;
 constexpr int kThumbnailWidth = 96;
 constexpr int kThumbnailHeight = 64;
@@ -132,7 +133,7 @@ Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr) {
     if (result && tile) {
         HGDIOBJ previous = SelectObject(tile, result.get());
         RECT bounds{0, 0, size.cx, size.cy};
-        FillRect(tile, &bounds, GetSysColorBrush(COLOR_WINDOW));
+        FillRect(tile, &bounds, theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kField));
         BITMAP image{};
         if (source && GetObjectW(source, sizeof(image), &image) &&
             image.bmWidth > 0 && image.bmHeight > 0) {
@@ -151,7 +152,7 @@ Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr) {
             }
         } else {
             SetBkMode(tile, TRANSPARENT);
-            SetTextColor(tile, GetSysColor(COLOR_GRAYTEXT));
+            SetTextColor(tile, theme::high_contrast() ? GetSysColor(COLOR_GRAYTEXT) : theme::kMuted);
             SelectObject(tile, GetStockObject(DEFAULT_GUI_FONT));
             DrawTextW(tile, L"Capture", -1, &bounds, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
         }
@@ -251,9 +252,6 @@ struct WindowsDashboard::Impl {
         Gdiplus::GdiplusStartup(&imaging, &options, nullptr);
     }
     WindowsLibrary library;
-    HBRUSH dashboard_paper = CreateSolidBrush(RGB(250, 243, 244));
-    HBRUSH dashboard_red = CreateSolidBrush(RGB(196, 9, 43));
-    HBRUSH dashboard_deep_red = CreateSolidBrush(RGB(129, 6, 31));
     ~Impl() {
         thumbnails.stop();
         if (window) DestroyWindow(window);
@@ -261,9 +259,6 @@ struct WindowsDashboard::Impl {
         if (body) DeleteObject(body);
         if (heading) DeleteObject(heading);
         if (title) DeleteObject(title);
-        DeleteObject(dashboard_paper);
-        DeleteObject(dashboard_red);
-        DeleteObject(dashboard_deep_red);
         if (imaging) Gdiplus::GdiplusShutdown(imaging);
     }
 
@@ -331,11 +326,11 @@ struct WindowsDashboard::Impl {
     void create_controls() {
         label(Title, kTitle);
         label(Subtitle, L"Keep your Nintendo Switch captures in a local album.");
-        button(OpenLibrary, L"Capture library", BS_OWNERDRAW);
-        button(OpenHistory, L"Sync history", BS_OWNERDRAW);
-        button(OpenStorage, L"Storage", BS_OWNERDRAW);
-        button(ImportCaptures, L"Import USB / SD…", BS_OWNERDRAW);
-        button(OpenDuplicates, L"Duplicate review", BS_OWNERDRAW);
+        button(OpenLibrary, L"Capture library");
+        button(OpenHistory, L"Sync history");
+        button(OpenStorage, L"Storage");
+        button(ImportCaptures, L"Import USB / SD…");
+        button(OpenDuplicates, L"Duplicate review");
         label(RuleAccount, L"", SS_ETCHEDHORZ);
         label(AccountHeading, L"Nintendo Account");
         label(AccountStatus);
@@ -382,6 +377,12 @@ struct WindowsDashboard::Impl {
             ShowWindow(controls[rule], SW_HIDE);
         }
         set_fonts();
+        theme::apply(window, theme::Caption::red);
+        theme::set_primary(controls[SyncNow]);
+        if (!theme::high_contrast()) {
+            ListView_SetBkColor(controls[Captures], theme::kCard);
+            ListView_SetTextBkColor(controls[Captures], theme::kCard);
+        }
         update(state);
     }
 
@@ -433,8 +434,8 @@ struct WindowsDashboard::Impl {
         place(OpenLibrary, kMargin, 96, 116, 31);
         place(OpenHistory, kMargin + 124, 96, 90, 31);
         place(OpenStorage, kMargin + 222, 96, 68, 31);
-        place(ImportCaptures, kMargin + 298, 96, 130, 31);
-        place(OpenDuplicates, kMargin + 436, 96, 124, 31);
+        place(ImportCaptures, kMargin + 298, 96, 142, 31);
+        place(OpenDuplicates, kMargin + 448, 96, 124, 31);
         place(RuleAccount, kMargin, 85, span, 2);
         place(AccountHeading, kMargin, 96, span - 130, 20);
         place(AccountStatus, kMargin, 120, span - (state.manual_sign_in ? 289 : 130), 31);
@@ -454,11 +455,11 @@ struct WindowsDashboard::Impl {
         place(Progress, kMargin, 345, span, 8);
         place(SyncNow, kMargin, 363, 100, 29);
         place(RetryFailed, kMargin + 108, 363, 102, 29);
-        place(AutoSync, right - 157, 363, 157, 29);
+        place(AutoSync, right - 184, 363, 184, 29);
         place(RuleCaptures, kMargin, 407, span, 2);
-        place(CapturesHeading, kMargin, 422, span - 220, 21);
-        place(CopyLatest, right - 208, 416, 98, 28);
-        place(ShowInFolder, right - 102, 416, 102, 28);
+        place(CapturesHeading, kMargin, 422, span - 242, 21);
+        place(CopyLatest, right - 230, 416, 104, 28);
+        place(ShowInFolder, right - 118, 416, 118, 28);
         place(Captures, kMargin, 451, span, 103);
         place(EmptyCaptures, kMargin, 457, span, 42);
         place(RuleSettings, kMargin, 561, span, 2);
@@ -542,6 +543,7 @@ struct WindowsDashboard::Impl {
                               L"Not signed in");
         text(AccountAction, state.sign_in_pending ? L"Cancel sign-in" :
             state.signed_in ? L"Sign out" : L"Sign in…");
+        theme::set_primary(controls[AccountAction], !state.signed_in && !state.sign_in_pending);
         ShowWindow(controls[PasteSignIn], state.manual_sign_in ? SW_SHOWNA : SW_HIDE);
         text(CredentialNote, !state.credential_status.empty() ? wide(state.credential_status) :
             state.signed_in ? L"" :
@@ -769,70 +771,35 @@ struct WindowsDashboard::Impl {
                 if (high_contrast_enabled()) {
                     FillRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOW));
                 } else {
-                    FillRect(dc, &bounds, dashboard_paper);
-                    const auto pen = SelectObject(dc, GetStockObject(NULL_PEN));
-                    const auto brush = SelectObject(dc, GetStockObject(WHITE_BRUSH));
+                    FillRect(dc, &bounds, theme::brush(theme::kBackground));
                     const int right = bounds.right - px(12);
                     const auto card = [&](int top, int bottom) {
-                        RoundRect(dc, px(12), px(top) - scroll, right, px(bottom) - scroll, px(17), px(17));
+                        theme::fill_round(dc, RECT{px(12), px(top) - scroll, right, px(bottom) - scroll},
+                                          px(14), theme::kCard);
                     };
                     card(135, 235);
                     card(242, 451);
                     card(458, 609);
                     card(616, 675 + (discord_expanded() ? kDiscordSettingsHeight : 0));
-                    SelectObject(dc, brush);
-                    SelectObject(dc, pen);
                     bounds.bottom = px(84) - scroll;
-                    FillRect(dc, &bounds, dashboard_red);
-                    bounds.top = bounds.bottom - px(4);
-                    FillRect(dc, &bounds, dashboard_deep_red);
+                    FillRect(dc, &bounds, theme::brush(theme::kRed));
+                    bounds.top = bounds.bottom - px(3);
+                    FillRect(dc, &bounds, theme::brush(theme::kRedDeep));
                 }
                 return TRUE;
             }
-            case WM_DRAWITEM: {
-                const auto& item = *reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
-                if (item.hwndItem != controls[OpenLibrary] && item.hwndItem != controls[OpenHistory] &&
-                    item.hwndItem != controls[OpenStorage] && item.hwndItem != controls[ImportCaptures] &&
-                    item.hwndItem != controls[OpenDuplicates]) {
-                    return DefWindowProcW(window, msg, wp, lp);
-                }
-                auto bounds = item.rcItem;
-                const bool primary = item.hwndItem == controls[OpenLibrary];
-                const bool contrast = high_contrast_enabled();
-                const bool pressed = (item.itemState & ODS_SELECTED) != 0;
-                FillRect(item.hDC, &bounds, contrast ? GetSysColorBrush(COLOR_BTNFACE) : dashboard_paper);
-                const HBRUSH fill = contrast ? GetSysColorBrush(pressed ? COLOR_HIGHLIGHT : COLOR_BTNFACE) :
-                    (primary || pressed ? dashboard_red : static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
-                if (imaging && !contrast) {
-                    const auto color = primary || pressed ? RGB(196, 9, 43) : RGB(255, 255, 255);
-                    Gdiplus::Graphics graphics(item.hDC);
-                    graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-                    Gdiplus::SolidBrush brush(Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color)));
-                    Gdiplus::GraphicsPath shape;
-                    const int diameter = px(14);
-                    shape.AddArc(bounds.left, bounds.top, diameter, diameter, 180, 90);
-                    shape.AddArc(bounds.right - diameter, bounds.top, diameter, diameter, 270, 90);
-                    shape.AddArc(bounds.right - diameter, bounds.bottom - diameter, diameter, diameter, 0, 90);
-                    shape.AddArc(bounds.left, bounds.bottom - diameter, diameter, diameter, 90, 90);
-                    shape.CloseFigure();
-                    graphics.FillPath(&brush, &shape);
-                } else {
-                    FillRect(item.hDC, &bounds, fill);
-                    FrameRect(item.hDC, &bounds, GetSysColorBrush(COLOR_BTNTEXT));
-                }
-                SetBkMode(item.hDC, TRANSPARENT);
-                SetTextColor(item.hDC, (item.itemState & ODS_DISABLED) ? GetSysColor(COLOR_GRAYTEXT) :
-                    contrast ? GetSysColor(pressed ? COLOR_HIGHLIGHTTEXT : COLOR_BTNTEXT) :
-                    primary || pressed ? RGB(255, 255, 255) : RGB(34, 25, 31));
-                wchar_t label[80]{};
-                GetWindowTextW(item.hwndItem, label, static_cast<int>(std::size(label)));
-                DrawTextW(item.hDC, label, -1, &bounds, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
-                if (item.itemState & ODS_FOCUS) {
-                    InflateRect(&bounds, -px(4), -px(4));
-                    DrawFocusRect(item.hDC, &bounds);
-                }
-                return TRUE;
+            case WM_CTLCOLORBTN: {
+                if (high_contrast_enabled()) return DefWindowProcW(window, msg, wp, lp);
+                const auto child = reinterpret_cast<HWND>(lp);
+                const bool header = child == controls[OpenLibrary] || child == controls[OpenHistory] ||
+                    child == controls[OpenStorage] || child == controls[ImportCaptures] ||
+                    child == controls[OpenDuplicates];
+                return theme::control_color(msg, wp, lp, header ? theme::kBackground : theme::kCard);
             }
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
+                if (const auto brush = theme::control_color(msg, wp, lp, theme::kCard)) return brush;
+                return DefWindowProcW(window, msg, wp, lp);
             case WM_CTLCOLORSTATIC: {
                 auto dc = reinterpret_cast<HDC>(wp);
                 SetBkMode(dc, TRANSPARENT);
@@ -841,9 +808,16 @@ struct WindowsDashboard::Impl {
                     return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
                 }
                 const auto child = reinterpret_cast<HWND>(lp);
-                const bool banner = child == controls[Title] || child == controls[Subtitle];
-                SetTextColor(dc, banner ? RGB(255, 255, 255) : RGB(34, 25, 31));
-                return reinterpret_cast<LRESULT>(banner ? dashboard_red : GetStockObject(WHITE_BRUSH));
+                if (child == controls[Title] || child == controls[Subtitle]) {
+                    SetTextColor(dc, child == controls[Title] ? RGB(255, 255, 255) : RGB(255, 224, 227));
+                    return reinterpret_cast<LRESULT>(theme::brush(theme::kRed));
+                }
+                const auto result = theme::control_color(msg, wp, lp, theme::kCard);
+                for (const auto id : {CredentialNote, LastSync, NextSync, SyncDetail, EmptyCaptures,
+                                      DiscordHint, DiscordZeldaGames, DiscordUnavailable, Feedback}) {
+                    if (child == controls[id]) SetTextColor(dc, theme::kMuted);
+                }
+                return result;
             }
             case WM_CLOSE:
                 close();
@@ -906,7 +880,7 @@ bool WindowsDashboard::create(HICON icon, const PlatformCallbacks& callbacks,
     type.hInstance = instance;
     type.hIcon = icon;
     type.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    type.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
+    type.hbrBackground = theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kBackground);
     type.lpszClassName = kDashboardClass;
     RegisterClassW(&type);
 

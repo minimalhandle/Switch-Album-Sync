@@ -213,6 +213,7 @@ if(WIN32)
         src/dashboard_windows.cpp
         src/library_windows.cpp
         src/import_windows.cpp
+        src/theme_windows.cpp
         src/http_windows.cpp
         src/platform_windows.cpp
         src/secure_store_windows.cpp
@@ -336,7 +337,7 @@ endif()
 if(WIN32)
     target_link_libraries(
         CaptureDock
-        PRIVATE advapi32 bcrypt crypt32 winhttp shell32 ole32 comdlg32 comctl32 gdi32 uuid gdiplus mfplat mfplay mfuuid
+        PRIVATE advapi32 bcrypt crypt32 winhttp shell32 ole32 comdlg32 comctl32 gdi32 uuid gdiplus dwmapi uxtheme mfplat mfplay mfuuid
     )
 elseif(APPLE)
     find_library(NSO_COCOA_FRAMEWORK Cocoa REQUIRED)
