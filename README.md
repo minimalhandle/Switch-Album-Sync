@@ -2,7 +2,7 @@
 
 **Automatically sync your Nintendo Switch Online album to your computer.**
 
-CaptureDock is a fork of [Dycool’s NSO Album Sync](https://github.com/Dycool/NSO-Album-Sync).
+CaptureDock works with captures from both **Nintendo Switch** and **Nintendo Switch 2**. It is a fork of [Dycool’s NSO Album Sync](https://github.com/Dycool/NSO-Album-Sync).
 
 🖼️ **Automatic album sync** — Downloads new screenshots and videos in the same `Album/<Game Name>/` layout used by Nintendo Switch USB transfers.
 
