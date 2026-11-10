@@ -3,9 +3,7 @@
 #include <fstream>
 #include <iterator>
 
-#ifdef _WIN32
 #include "nso_album_sync/windows_compat.hpp"
-#endif
 
 namespace nso {
 Json read_local_data(const std::filesystem::path& path) {
@@ -26,14 +24,8 @@ bool write_local_data(const std::filesystem::path& path, const Json& data) {
         output << data.dump();
         output.close();
         if (output) {
-#ifdef _WIN32
             if (MoveFileExW(temporary.c_str(), path.c_str(),
                             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
-#else
-            std::error_code error;
-            std::filesystem::rename(temporary, path, error);
-            if (!error) return true;
-#endif
         }
     } catch (const std::exception&) {
     }

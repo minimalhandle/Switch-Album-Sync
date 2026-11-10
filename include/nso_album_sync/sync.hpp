@@ -29,6 +29,7 @@ struct SyncResult {
         std::string label;
         std::string outcome;
         std::string retry_id;
+        bool transient = false;
     };
     int total_found = 0;
     int new_downloads = 0;
@@ -44,6 +45,7 @@ struct SyncResult {
 };
 
 std::filesystem::path album_directory(const std::filesystem::path& destination);
+bool is_default_album_folder(const std::filesystem::path& folder);
 std::vector<LocalCapture> scan_capture_library(const std::filesystem::path& destination,
     const std::function<bool()>& cancelled = {});
 std::vector<std::filesystem::path> recent_captures(

@@ -1,8 +1,10 @@
 #include "library_windows.hpp"
 #include "import_windows.hpp"
+#include "share_windows.hpp"
 #include "theme_windows.hpp"
 #include "nso_album_sync/local_data.hpp"
 #include "nso_album_sync/path.hpp"
+#include "nso_album_sync/sync.hpp"
 #include "nso_album_sync/util.hpp"
 
 #include <commctrl.h>
@@ -16,17 +18,18 @@
 #include <chrono>
 #include <cstring>
 #include <ctime>
+#include <future>
 #include <map>
 #include <set>
 
 namespace nso {
 namespace {
-constexpr wchar_t kClass[] = L"CaptureDockAlbumTools";
+constexpr wchar_t kClass[] = L"SwitchAlbumSyncAlbumTools";
 constexpr UINT kApplySelection = WM_APP + 72;
 enum Control { Library = 3000, History, Storage, Duplicates, Title, Search, NewCaptures, Game, Date, Type, Favorites,
-               Collections, CollectionName, SaveCollection, DeleteCollection, Runs, Rows, Preview,
+               Collections, CollectionName, SaveCollection, DeleteCollection, ClearFilters, Runs, NextRetry, Rows, Preview,
                ExistingLabel, IncomingLabel, IncomingPreview, OpenExisting, OpenIncoming, KeepExisting,
-               Tags, Save, Favorite, Play, Stop, Action, Refresh, CopyFiles, Status, VideoSurface, End };
+               Tags, Save, Favorite, Play, Stop, Action, Refresh, CopyFiles, QuickShare, Status, VideoSurface, End };
 
 std::wstring wide(const std::string& value) {
     if (value.empty()) return {};
@@ -193,6 +196,8 @@ struct WindowsLibrary::Impl {
     std::filesystem::path preferences_path;
     Json::object preferences;
     Json::object collections;
+    std::future<std::filesystem::path> share_export;
+    bool share_dialog_open = false;
     std::vector<std::string> collection_names;
     std::filesystem::path game_filter;
     std::filesystem::path visited_album;
@@ -264,6 +269,7 @@ struct WindowsLibrary::Impl {
         SendMessageW(get(CollectionName), EM_LIMITTEXT, 80, 0);
         button(SaveCollection, L"Save filters");
         button(DeleteCollection, L"Delete");
+        button(ClearFilters, L"Clear filters");
         for (const auto id : {Game, Date, Type, Runs, Collections}) {
             make(id, L"COMBOBOX", L"", CBS_DROPDOWNLIST | WS_TABSTOP | WS_VSCROLL);
         }
@@ -291,6 +297,8 @@ struct WindowsLibrary::Impl {
         button(Action, L"Open file");
         button(Refresh, L"Refresh");
         button(CopyFiles, L"Copy selected files");
+        button(QuickShare, L"Quick Share…");
+        make(NextRetry, L"STATIC", L"", SS_NOPREFIX);
         make(Status, L"STATIC", L"", SS_NOPREFIX);
         fonts();
         theme::apply(window, theme::Caption::red);
@@ -327,12 +335,14 @@ struct WindowsLibrary::Impl {
         place(Date, width - 374, 145, 116, 175);
         place(Type, width - 248, 145, 105, 170);
         place(Favorites, width - 133, 143, 118, 27);
-        place(Collections, 20, 181, width - 379, 220);
-        place(CollectionName, width - 349, 181, 150, 26);
-        place(SaveCollection, width - 189, 180, 96, 27);
-        place(DeleteCollection, width - 83, 180, 63, 27);
+        place(Collections, 20, 181, width - 483, 220);
+        place(CollectionName, width - 453, 181, 150, 26);
+        place(SaveCollection, width - 293, 180, 96, 27);
+        place(DeleteCollection, width - 187, 180, 63, 27);
+        place(ClearFilters, width - 114, 180, 94, 27);
         place(Runs, 20, 110, width - 40, 235);
-        const int top = library() ? 219 : duplicates() ? 109 : 148;
+        place(NextRetry, 20, 146, width - 40, 22);
+        const int top = library() ? 219 : duplicates() ? 109 : history() ? 174 : 148;
         const int list_height = duplicates() ? std::max(86, height / 4) : height - top - 78;
         place(Rows, 20, top, library() ? panel_x - 34 : width - 40, list_height);
         const int preview_height = std::max(50, height - 356);
@@ -357,6 +367,7 @@ struct WindowsLibrary::Impl {
         place(KeepExisting, 207, height - 39, 151, 29);
         place(Refresh, duplicates() ? 368 : 207, height - 39, 86, 29);
         place(CopyFiles, 303, height - 39, 164, 29);
+        place(QuickShare, 477, height - 39, 140, 29);
         if (player) player->UpdateVideo();
     }
     void stop() {
@@ -399,7 +410,8 @@ struct WindowsLibrary::Impl {
         choice(Game, index);
         SendMessageW(get(Runs), CB_RESETCONTENT, 0, 0);
         if (state.sync_history) for (const auto& run : *state.sync_history) {
-            option(Runs, wide(run.string("time")) + L"  ·  " + std::to_wstring(run.integer("downloaded")) +
+            option(Runs, wide(run.string("time")) + (run.boolean("automatic_retry") ? L"  ·  Automatic retry" : L"") +
+                L"  ·  " + std::to_wstring(run.integer("downloaded")) +
                 L" downloaded  ·  " + std::to_wstring(run.integer("skipped")) + L" skipped  ·  " +
                 std::to_wstring(run.integer("failed")) + L" failed");
         }
@@ -430,16 +442,40 @@ struct WindowsLibrary::Impl {
     void load_collection() {
         const auto name = selected_collection();
         enable(DeleteCollection, !name.empty());
-        if (name.empty()) return;
+        if (name.empty()) {
+            set(CollectionName, L"");
+            return;
+        }
         const auto& filters = collections.at(name);
         updating = true;
         set(Search, wide(filters.string("query")));
         set(CollectionName, wide(name));
         game_filter = path_from_utf8(filters.string("game"));
+        const auto legacy = state.destination / L"Album";
+        if (is_default_album_folder(state.destination)) {
+            if (game_filter == legacy) game_filter = state.destination;
+            else if (game_filter.parent_path() == legacy) game_filter = state.destination / game_filter.filename();
+        }
         choices();
         choice(Date, static_cast<int>(std::clamp<std::int64_t>(filters.integer("date"), 0, 3)));
         choice(Type, static_cast<int>(std::clamp<std::int64_t>(filters.integer("type"), 0, 2)));
         check(Favorites, filters.boolean("favorites"));
+        clear_arrivals();
+        check(NewCaptures, filters.boolean("new_captures"));
+        updating = false;
+        populate();
+    }
+
+    void clear_filters() {
+        updating = true;
+        set(Search, L"");
+        set(CollectionName, L"");
+        collection_choices();
+        game_filter.clear();
+        choice(Game, 0);
+        choice(Date, 0);
+        choice(Type, 0);
+        check(Favorites, false);
         clear_arrivals();
         updating = false;
         populate();
@@ -454,12 +490,16 @@ struct WindowsLibrary::Impl {
             }
             return;
         }
+        if (!remove && collections.contains(name) &&
+            theme::message_box(window, L"Replace the filters for “" + wide(name) + L"”?",
+                L"Save smart collection", MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
         auto next = collections;
         if (remove) next.erase(name);
         else next[name] = Json::object{
             {"query", utf8(text_of(get(Search)))},
             {"game", path_to_utf8(game_filter)},
-            {"date", choice(Date)}, {"type", choice(Type)}, {"favorites", checked(Favorites)}};
+            {"date", choice(Date)}, {"type", choice(Type)}, {"favorites", checked(Favorites)},
+            {"new_captures", arrivals.empty() && checked(NewCaptures)}};
         auto data = preferences;
         data["collections"] = next;
         if (preferences_path.empty() || !write_local_data(preferences_path, data)) {
@@ -482,7 +522,10 @@ struct WindowsLibrary::Impl {
         auto visits = stored && stored->is_object() ? stored->as_object() : Json::object{};
         const auto now = std::chrono::floor<std::chrono::milliseconds>(
             std::chrono::system_clock::now()).time_since_epoch().count();
-        const auto old = visits.find(key);
+        auto old = visits.find(key);
+        if (old == visits.end() && is_default_album_folder(visited_album)) {
+            old = visits.find(path_to_utf8(visited_album / L"Album"));
+        }
         previous_visit = old == visits.end() ? now : old->second.as_i64(now);
         visits[key] = now;
         auto data = preferences;
@@ -543,6 +586,53 @@ struct WindowsLibrary::Impl {
         set(Status, copy_capture_files(window, paths)
             ? std::to_wstring(paths.size()) + L" files copied. Paste them into a chat or folder."
             : L"Could not copy the selected files. Refresh if a file has moved.");
+    }
+
+    void quick_share() {
+        if (share_export.valid() || share_dialog_open) return;
+        const auto paths = selected_paths();
+        if (paths.empty()) return;
+        share_dialog_open = true;
+        theme::Dialog dialog;
+        dialog.title = L"Quick Share";
+        dialog.heading = L"Export " + std::to_wstring(paths.size()) + L" selected captures";
+        dialog.width = 580;
+        dialog.text = L"Choose a folder of copies, a ZIP file, or a PNG grid of up to 48 screenshots. "
+                      L"Grids include screenshots only. Resized copies are saved as PNG.";
+        dialog.checkbox_label = L"Resize screenshots to fit within 1280 × 1280";
+        dialog.buttons = {{IDCANCEL, L"Cancel"}, {IDNO, L"Export ZIP"}, {IDOK, L"Export folder", true}};
+        const auto screenshots = std::count_if(paths.begin(), paths.end(), is_share_screenshot);
+        if (screenshots > 0 && screenshots <= 48) {
+            dialog.buttons.insert(dialog.buttons.begin() + 1, {IDYES, L"Screenshot grid"});
+        }
+        const int mode = theme::run_dialog(window, dialog);
+        const auto folder = mode == IDCANCEL ? std::filesystem::path{} : pick_share_folder(window);
+        share_dialog_open = false;
+        if (folder.empty()) return;
+        try {
+            const auto format = mode == IDYES ? ShareFormat::contact_sheet :
+                mode == IDNO ? ShareFormat::zip : ShareFormat::folder;
+            share_export = std::async(std::launch::async, export_captures, paths, folder, format, dialog.checked);
+            SetTimer(window, 2, 150, nullptr);
+            enable(QuickShare, false);
+            set(Status, L"Exporting captures…");
+        } catch (const std::exception&) {
+            set(Status, L"Could not start the export.");
+        }
+    }
+
+    void finish_share() {
+        if (!share_export.valid() || share_export.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return;
+        KillTimer(window, 2);
+        std::wstring message;
+        try {
+            message = L"Export saved to " + share_export.get().wstring();
+        } catch (const std::exception& error) {
+            message = L"Export failed. " + wide(error.what());
+        }
+        enable(QuickShare, library() && ListView_GetSelectedCount(get(Rows)) > 0);
+        if (IsWindowVisible(window)) theme::message_box(window, message, L"Quick Share", MB_OK);
+        if (library()) set(Status, message);
     }
 
     const ImportMatch* selected_match() const {
@@ -674,6 +764,8 @@ struct WindowsLibrary::Impl {
     void selection() {
         selection_pending = false;
         if (history()) {
+            set(NextRetry, state.next_retry.empty() ? L"No automatic retry scheduled" :
+                L"Next automatic retry: " + wide(state.next_retry));
             const auto* run = selected_run();
             const auto* item = selected_result();
             enable(Action, !state.sync_busy && !state.retry_scope.empty() && run && item &&
@@ -704,6 +796,7 @@ struct WindowsLibrary::Impl {
         const auto* capture = selected_capture();
         const auto selected = ListView_GetSelectedCount(get(Rows));
         enable(CopyFiles, selected > 0);
+        enable(QuickShare, selected > 0 && !share_export.valid());
         if (selected > 1) capture = nullptr;
         for (const auto id : {Action, Tags, Save, Favorite}) enable(id, capture != nullptr);
         enable(Play, capture && capture->video);
@@ -728,7 +821,7 @@ struct WindowsLibrary::Impl {
         if (favorite || !tags.empty()) next[key] = Json::object{{"favorite", favorite}, {"tags", tags}};
         else next.erase(key);
         if (!write_local_data(labels_path, Json(next))) {
-            set(Status, L"Could not save labels. Check access to CaptureDock settings.");
+            set(Status, L"Could not save labels. Check access to Switch Album Sync settings.");
             return;
         }
         labels.swap(next);
@@ -781,7 +874,7 @@ struct WindowsLibrary::Impl {
         if (!match || state.sync_busy || (!keep_both && !IsWindowEnabled(get(KeepExisting)))) return;
         const auto selected = *match;
         const auto album = state.destination;
-        if (!keep_both && theme::message_box(window, L"Discard CaptureDock’s staged incoming copy and keep the album copy?",
+        if (!keep_both && theme::message_box(window, L"Discard Switch Album Sync’s staged incoming copy and keep the album copy?",
             L"Duplicate review", MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
         image.reset();
         incoming_image.reset();
@@ -802,7 +895,7 @@ struct WindowsLibrary::Impl {
         if (!still) {
             const auto* capture = selected_capture();
             SetBkMode(draw.hDC, TRANSPARENT);
-            SetTextColor(draw.hDC, theme::kMuted);
+            SetTextColor(draw.hDC, RGB(230, 231, 233));
             const auto* caption = duplicates() ? (selected_match() ? L"Open file to view" : L"Select a match") :
                 ListView_GetSelectedCount(get(Rows)) > 1 ? L"Multiple captures selected" :
                 !capture ? L"Select a capture" : capture->video ? L"Press Play to preview" : L"Preview unavailable";
@@ -826,10 +919,11 @@ struct WindowsLibrary::Impl {
         const auto row_style = GetWindowLongPtrW(get(Rows), GWL_STYLE);
         SetWindowLongPtrW(get(Rows), GWL_STYLE, library() ? row_style & ~LVS_SINGLESEL : row_style | LVS_SINGLESEL);
         for (auto id : {Search, NewCaptures, Game, Date, Type, Favorites, Collections, CollectionName,
-                       SaveCollection, DeleteCollection, Tags, Save, Favorite, Play, Stop, CopyFiles}) show(id, library());
+                       SaveCollection, DeleteCollection, ClearFilters, Tags, Save, Favorite, Play, Stop, CopyFiles, QuickShare}) show(id, library());
         for (auto id : {ExistingLabel, IncomingLabel, IncomingPreview, OpenExisting, OpenIncoming, KeepExisting}) show(id, duplicates());
         show(Preview, library() || duplicates());
         show(Runs, history());
+        show(NextRetry, history());
         show(Refresh, !history());
         set(Title, library() ? L"Capture library" : history() ? L"Sync history" :
             duplicates() ? L"Duplicate review" : L"Album storage");
@@ -891,8 +985,12 @@ struct WindowsLibrary::Impl {
                 GetClientRect(window, &bounds);
                 const auto dc = reinterpret_cast<HDC>(wp);
                 FillRect(dc, &bounds, high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : paper);
-                bounds.bottom = px(56);
-                if (!high_contrast()) FillRect(dc, &bounds, red);
+                if (!high_contrast()) {
+                    bounds.bottom = px(60);
+                    FillRect(dc, &bounds, theme::brush(theme::kCard));
+                    const RECT accent{px(20), px(56), px(62), px(58)};
+                    FillRect(dc, &accent, red);
+                }
                 return TRUE;
             }
             case WM_CTLCOLORSTATIC: {
@@ -905,8 +1003,8 @@ struct WindowsLibrary::Impl {
                 }
                 if (child == get(Title)) {
                     SetBkMode(dc, TRANSPARENT);
-                    SetTextColor(dc, RGB(255, 255, 255));
-                    return reinterpret_cast<LRESULT>(red);
+                    SetTextColor(dc, theme::kText);
+                    return reinterpret_cast<LRESULT>(theme::brush(theme::kCard));
                 }
                 const auto result = theme::control_color(msg, wp, lp, theme::kBackground);
                 if (child == get(Status)) SetTextColor(dc, theme::kMuted);
@@ -935,6 +1033,7 @@ struct WindowsLibrary::Impl {
                 if (selection_pending) selection();
                 return 0;
             case WM_TIMER:
+                if (wp == 2) { finish_share(); return 0; }
                 if (wp == 1) {
                     KillTimer(window, 1);
                     populate(selected_paths());
@@ -968,6 +1067,8 @@ struct WindowsLibrary::Impl {
                     case Collections: if (HIWORD(wp) == CBN_SELCHANGE) load_collection(); break;
                     case SaveCollection: edit_collection(false); break;
                     case DeleteCollection: edit_collection(true); break;
+                    case ClearFilters: clear_filters(); break;
+                    case QuickShare: quick_share(); break;
                     case CopyFiles: copy_selected(); break;
                     case OpenExisting: case OpenIncoming:
                         if (const auto* match = selected_match()) {
@@ -1062,7 +1163,7 @@ void WindowsLibrary::show(HWND owner, LibraryPage page, const PlatformCallbacks&
         const auto& work = monitor.rcWork;
         const int width = std::min(MulDiv(1000, dpi, 96), static_cast<int>(work.right - work.left));
         const int height = std::min(MulDiv(680, dpi, 96), static_cast<int>(work.bottom - work.top));
-        CreateWindowExW(WS_EX_CONTROLPARENT, kClass, L"CaptureDock · Album tools", WS_OVERLAPPEDWINDOW,
+        CreateWindowExW(WS_EX_CONTROLPARENT, kClass, L"Switch Album Sync · Album tools", WS_OVERLAPPEDWINDOW,
             work.left + (work.right - work.left - width) / 2, work.top + (work.bottom - work.top - height) / 2,
             width, height, owner, nullptr, instance, impl_.get());
         if (old_dpi) SetThreadDpiAwarenessContext(old_dpi);

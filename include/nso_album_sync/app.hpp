@@ -17,6 +17,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
+#include <map>
 #include <string>
 #include <thread>
 
@@ -58,14 +59,22 @@ private:
     std::thread presence_thread_;
     std::thread auth_callback_thread_;
 
-    enum class SyncRequest { none, automatic, manual, retry, local_import };
+    enum class SyncRequest { none, automatic, manual, retry, automatic_retry, local_import };
 
     std::mutex sync_queue_mutex_;
     std::condition_variable sync_queue_cv_;
     SyncRequest sync_request_ = SyncRequest::none;
     std::string requested_capture_;
     std::string requested_scope_;
+    std::shared_ptr<const struct ImportPlan> requested_import_;
     bool sync_running_ = false;
+    struct PendingRetry {
+        std::chrono::steady_clock::time_point due;
+        int attempts = 0;
+    };
+    std::map<std::string, PendingRetry> pending_retries_;
+    std::chrono::steady_clock::time_point next_retry_locked() const;
+    void clear_pending_retries();
     bool recent_refresh_requested_ = false;
 
     std::mutex auth_flow_mutex_;
@@ -94,12 +103,11 @@ private:
 
     void update_menu();
     void sync_now(SyncRequest request, const std::string& capture, const std::string& scope);
-    bool queue_sync(SyncRequest request, const std::string& capture = {}, const std::string& scope = {});
+    bool queue_sync(SyncRequest request, const std::string& capture = {}, const std::string& scope = {},
+        std::shared_ptr<const ImportPlan> import = {});
     void queue_recent_refresh();
     void refresh_recent_captures();
-#ifdef _WIN32
-    void import_captures(const std::string& source);
-#endif
+    std::vector<std::filesystem::path> import_captures(const ImportPlan& plan);
     void reschedule_auto_sync();
     void request_presence_refresh();
     void sign_in_or_out();

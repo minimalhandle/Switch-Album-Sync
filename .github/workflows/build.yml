@@ -18,5 +18,5 @@ jobs:
       - run: cmake --build build --config Release --parallel
       - shell: pwsh
         run: |
-          $test = Start-Process build/Release/CaptureDock.exe -ArgumentList '--self-test' -Wait -PassThru
+          $test = Start-Process "build/Release/Switch Album Sync.exe" -ArgumentList '--self-test' -Wait -PassThru
           exit $test.ExitCode

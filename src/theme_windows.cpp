@@ -12,28 +12,16 @@
 namespace nso::theme {
 namespace {
 
-constexpr wchar_t kPrimaryProp[] = L"CaptureDock.Primary";
-constexpr wchar_t kHotProp[] = L"CaptureDock.Hot";
+constexpr wchar_t kPrimaryProp[] = L"Switch Album Sync.Primary";
+constexpr wchar_t kHotProp[] = L"Switch Album Sync.Hot";
 constexpr UINT_PTR kButtonSubclass = 0xCD01;
 
-// Windows 10 1809+/Windows 11 attributes. Older SDKs may not define them.
-constexpr DWORD kDarkModeAttribute = 20;
-constexpr DWORD kDarkModeAttributeLegacy = 19;
+// Windows 11 caption attributes. Older SDKs may not define them.
 constexpr DWORD kBorderColorAttribute = 34;
 constexpr DWORD kCaptionColorAttribute = 35;
 constexpr DWORD kTextColorAttribute = 36;
 
-using AllowDarkModeForWindow = BOOL(WINAPI*)(HWND, BOOL);
-AllowDarkModeForWindow g_allow_dark_window = nullptr;
 ULONG_PTR g_gdiplus = 0;
-
-DWORD windows_build() {
-    using RtlGetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
-    const auto ntdll = GetModuleHandleW(L"ntdll.dll");
-    const auto get = ntdll ? reinterpret_cast<RtlGetVersion>(GetProcAddress(ntdll, "RtlGetVersion")) : nullptr;
-    OSVERSIONINFOW info{sizeof(info)};
-    return get && get(&info) == 0 ? info.dwBuildNumber : 0;
-}
 
 Gdiplus::Color gdi(COLORREF color) {
     return Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color));
@@ -105,9 +93,9 @@ void paint_button(HWND button, HDC target) {
             InflateRect(&ring, scale(button, 2), scale(button, 2));
             fill_round(dc, ring, (ring.bottom - ring.top) / 2, kText);
         }
-        const COLORREF fill = on ? (enabled ? (hot ? kRedHot : kRed) : RGB(96, 24, 30)) :
-            enabled ? (hot ? kControlHot : kControl) : kControlPressed;
-        fill_round(dc, track, track_h / 2, fill, on ? CLR_INVALID : kBorder);
+        const COLORREF fill = !enabled ? kControlPressed :
+            on ? (hot ? kRedHot : kRed) : (hot ? kMuted : kDisabled);
+        fill_round(dc, track, track_h / 2, fill);
         const int knob = track_h - scale(button, 6);
         RECT dot{on ? track.right - scale(button, 3) - knob : track.left + scale(button, 3),
                  track.top + scale(button, 3), 0, 0};
@@ -120,7 +108,7 @@ void paint_button(HWND button, HDC target) {
         DrawTextW(dc, label, -1, &text, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | prefix);
     } else {
         const bool primary = GetPropW(button, kPrimaryProp) != nullptr;
-        const COLORREF fill = !enabled ? (primary ? RGB(96, 24, 30) : kControlPressed) :
+        const COLORREF fill = !enabled ? kControlPressed :
             pressed ? (primary ? kRedPressed : kControlPressed) :
             hot ? (primary ? kRedHot : kControlHot) : (primary ? kRed : kControl);
         RECT shape = bounds;
@@ -130,8 +118,7 @@ void paint_button(HWND button, HDC target) {
         }
         fill_round(dc, shape, (shape.bottom - shape.top) / 2, fill,
                    primary || !enabled || focused ? CLR_INVALID : kBorder);
-        SetTextColor(dc, !enabled ? (primary ? RGB(200, 140, 145) : kDisabled) :
-                         primary ? RGB(255, 255, 255) : kText);
+        SetTextColor(dc, !enabled ? kDisabled : primary ? RGB(255, 255, 255) : kText);
         RECT text = bounds;
         InflateRect(&text, -scale(button, 8), 0);
         DrawTextW(dc, label, -1, &text, DT_SINGLELINE | DT_CENTER | DT_VCENTER | DT_END_ELLIPSIS | prefix);
@@ -205,24 +192,6 @@ LRESULT CALLBACK button_proc(HWND button, UINT msg, WPARAM wp, LPARAM lp, UINT_P
     return DefSubclassProc(button, msg, wp, lp);
 }
 
-// Header controls report custom draw to their list view, so the list view is
-// subclassed to give column titles readable text on the dark header.
-LRESULT CALLBACK list_proc(HWND list, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR) {
-    if (msg == WM_NCDESTROY) {
-        RemoveWindowSubclass(list, list_proc, id);
-    } else if (msg == WM_NOTIFY && !high_contrast()) {
-        auto* draw = reinterpret_cast<NMCUSTOMDRAW*>(lp);
-        if (draw->hdr.code == NM_CUSTOMDRAW && draw->hdr.hwndFrom == ListView_GetHeader(list)) {
-            if (draw->dwDrawStage == CDDS_PREPAINT) return CDRF_NOTIFYITEMDRAW;
-            if (draw->dwDrawStage == CDDS_ITEMPREPAINT) {
-                SetTextColor(draw->hdc, kMuted);
-                return CDRF_DODEFAULT;
-            }
-        }
-    }
-    return DefSubclassProc(list, msg, wp, lp);
-}
-
 void theme_child(HWND child) {
     wchar_t name[64]{};
     GetClassNameW(child, name, static_cast<int>(std::size(name)));
@@ -233,25 +202,16 @@ void theme_child(HWND child) {
         if (GetWindowSubclass(child, button_proc, kButtonSubclass, &data)) return;
         if ((style & BS_TYPEMASK) == BS_DEFPUSHBUTTON) set_primary(child);
         SetWindowSubclass(child, button_proc, kButtonSubclass, 0);
-    } else if (!lstrcmpiW(name, L"Edit")) {
-        SetWindowTheme(child, L"DarkMode_CFD", nullptr);
-    } else if (!lstrcmpiW(name, L"ComboBox")) {
-        SetWindowTheme(child, L"DarkMode_CFD", nullptr);
-        COMBOBOXINFO info{sizeof(info)};
-        if (GetComboBoxInfo(child, &info) && info.hwndList) {
-            SetWindowTheme(info.hwndList, L"DarkMode_Explorer", nullptr);
-        }
     } else if (!lstrcmpiW(name, WC_LISTVIEWW)) {
-        SetWindowTheme(child, L"DarkMode_Explorer", nullptr);
-        if (const auto header = ListView_GetHeader(child)) SetWindowTheme(header, L"DarkMode_ItemsView", nullptr);
-        SetWindowSubclass(child, list_proc, kButtonSubclass + 1, 0);
-        ListView_SetBkColor(child, kField);
-        ListView_SetTextBkColor(child, kField);
+        if (high_contrast()) return;
+        ListView_SetBkColor(child, kCard);
+        ListView_SetTextBkColor(child, kCard);
         ListView_SetTextColor(child, kText);
     } else if (!lstrcmpiW(name, PROGRESS_CLASSW)) {
+        if (high_contrast()) return;
         SetWindowTheme(child, L"", L"");
         SendMessageW(child, PBM_SETBARCOLOR, 0, static_cast<LPARAM>(kRed));
-        SendMessageW(child, PBM_SETBKCOLOR, 0, static_cast<LPARAM>(kControl));
+        SendMessageW(child, PBM_SETBKCOLOR, 0, static_cast<LPARAM>(kControlPressed));
     }
 }
 
@@ -268,21 +228,6 @@ void init_process() {
     std::call_once(once, [] {
         Gdiplus::GdiplusStartupInput options;
         Gdiplus::GdiplusStartup(&g_gdiplus, &options, nullptr);
-        const DWORD build = windows_build();
-        if (build < 17763) return;
-        const HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        if (!uxtheme) return;
-        // Undocumented but stable uxtheme exports used for dark menus and
-        // scrollbars: 133 AllowDarkModeForWindow, 135 SetPreferredAppMode
-        // (AllowDarkModeForApp before 1903), 136 FlushMenuThemes.
-        g_allow_dark_window = reinterpret_cast<AllowDarkModeForWindow>(
-            GetProcAddress(uxtheme, MAKEINTRESOURCEA(133)));
-        using SetAppMode = int(WINAPI*)(int);
-        if (const auto set_mode = reinterpret_cast<SetAppMode>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)))) {
-            set_mode(build >= 18362 ? 2 /* ForceDark */ : 1 /* allow */);
-        }
-        using Flush = void(WINAPI*)();
-        if (const auto flush = reinterpret_cast<Flush>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)))) flush();
     });
 }
 
@@ -298,18 +243,12 @@ HBRUSH brush(COLORREF color) {
 void apply(HWND window, Caption caption) {
     init_process();
     if (!high_contrast()) {
-        const BOOL dark = TRUE;
-        if (FAILED(DwmSetWindowAttribute(window, kDarkModeAttribute, &dark, sizeof(dark)))) {
-            DwmSetWindowAttribute(window, kDarkModeAttributeLegacy, &dark, sizeof(dark));
-        }
         const COLORREF title = caption == Caption::red ? kRed : kBackground;
         const COLORREF border = caption == Caption::red ? kRed : kBorder;
-        const COLORREF text = RGB(255, 255, 255);
+        const COLORREF text = caption == Caption::red ? RGB(255, 255, 255) : kText;
         DwmSetWindowAttribute(window, kCaptionColorAttribute, &title, sizeof(title));
         DwmSetWindowAttribute(window, kBorderColorAttribute, &border, sizeof(border));
         DwmSetWindowAttribute(window, kTextColorAttribute, &text, sizeof(text));
-        if (g_allow_dark_window) g_allow_dark_window(window, TRUE);
-        SetWindowTheme(window, L"DarkMode_Explorer", nullptr);
     }
     EnumChildWindows(window, [](HWND child, LPARAM) -> BOOL {
         theme_child(child);
@@ -376,10 +315,12 @@ void fill_round(HDC dc, const RECT& bounds, int radius, COLORREF fill, COLORREF 
 
 namespace {
 
-constexpr wchar_t kDialogClass[] = L"CaptureDockDialog";
+constexpr wchar_t kDialogClass[] = L"SwitchAlbumSyncDialog";
 constexpr int kHeadingId = 900;
 constexpr int kTextId = 901;
 constexpr int kFieldId = 902;
+constexpr int kCheckboxId = 903;
+constexpr int kChoicesId = 904;
 
 struct DialogWindow {
     Dialog* spec = nullptr;
@@ -388,6 +329,8 @@ struct DialogWindow {
     HWND heading = nullptr;
     HWND text = nullptr;
     HWND field = nullptr;
+    HWND checkbox = nullptr;
+    HWND choices = nullptr;
     std::vector<HWND> buttons;
     HFONT body = nullptr;
     HFONT bold = nullptr;
@@ -416,6 +359,8 @@ struct DialogWindow {
             SendMessageW(field, WM_SETFONT, reinterpret_cast<WPARAM>(body), FALSE);
             SendMessageW(field, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(px(6), px(6)));
         }
+        if (checkbox) SendMessageW(checkbox, WM_SETFONT, reinterpret_cast<WPARAM>(body), FALSE);
+        if (choices) SendMessageW(choices, WM_SETFONT, reinterpret_cast<WPARAM>(body), FALSE);
         SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(bold), FALSE);
         if (old_body) DeleteObject(old_body);
         if (old_bold) DeleteObject(old_bold);
@@ -450,6 +395,14 @@ struct DialogWindow {
         if (field) {
             place(field, margin, y, inner, px(30));
             y += px(30) + px(20);
+        }
+        if (checkbox) {
+            place(checkbox, margin, y, inner, px(26));
+            y += px(38);
+        }
+        if (choices) {
+            place(choices, margin, y, inner, px(210));
+            y += px(224);
         }
         const int height = px(32), gap = px(8);
         int right = width - margin;
@@ -525,8 +478,8 @@ struct DialogWindow {
             case WM_CTLCOLORSTATIC:
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORBTN:
+            case WM_CTLCOLORLISTBOX:
                 if (const auto color = control_color(msg, wp, lp, kBackground)) {
-                    if (reinterpret_cast<HWND>(lp) == heading) SetTextColor(reinterpret_cast<HDC>(wp), RGB(255, 255, 255));
                     return color;
                 }
                 break;
@@ -534,6 +487,9 @@ struct DialogWindow {
                 return MAKELRESULT(primary_id(), DC_HASDEFID);
             case WM_COMMAND:
                 if (HIWORD(wp) == BN_CLICKED || LOWORD(wp) == IDOK || LOWORD(wp) == IDCANCEL) command(LOWORD(wp));
+                return 0;
+            case WM_TIMER:
+                if (wp == 1 && spec->completed && spec->completed()) finish(IDOK);
                 return 0;
             case WM_CLOSE:
                 finish(spec->cancel_id);
@@ -606,6 +562,21 @@ int run_dialog(HWND owner, Dialog& spec) {
             SendMessageW(state.field, EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(spec.field_cue.c_str()));
         }
     }
+    if (!spec.checkbox_label.empty()) {
+        state.checkbox = child(L"BUTTON", spec.checkbox_label, WS_TABSTOP | BS_AUTOCHECKBOX, kCheckboxId);
+        SendMessageW(state.checkbox, BM_SETCHECK, spec.checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    if (!spec.choices.empty()) {
+        state.choices = child(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL |
+            LBS_MULTIPLESEL | LBS_NOINTEGRALHEIGHT, kChoicesId, WS_EX_CLIENTEDGE);
+        for (const auto& choice : spec.choices) {
+            if (SendMessageW(state.choices, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice.c_str())) < 0) {
+                DestroyWindow(window);
+                return spec.cancel_id;
+            }
+        }
+        for (int index : spec.selected) SendMessageW(state.choices, LB_SETSEL, TRUE, index);
+    }
     const int primary = state.primary_id();
     for (const auto& button : spec.buttons) {
         const HWND control = child(L"BUTTON", button.label,
@@ -613,14 +584,24 @@ int run_dialog(HWND owner, Dialog& spec) {
         state.buttons.push_back(control);
     }
     state.fonts();
+    if (state.choices) {
+        LONG extent = 0;
+        for (const auto& choice : spec.choices) extent = std::max(extent, state.measure(state.body, choice, 0, false).cx);
+        SendMessageW(state.choices, LB_SETHORIZONTALEXTENT, extent + state.px(12), 0);
+    }
     state.fit(nullptr);
     apply(window);
     for (std::size_t i = 0; i < spec.buttons.size(); ++i) set_primary(state.buttons[i], spec.buttons[i].primary);
 
     if (owner) EnableWindow(owner, FALSE);
+    if (spec.completed && !SetTimer(window, 1, 100, nullptr)) {
+        if (owner) EnableWindow(owner, TRUE);
+        DestroyWindow(window);
+        return spec.cancel_id;
+    }
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
-    HWND focus = state.field;
+    HWND focus = state.field ? state.field : state.choices;
     for (std::size_t i = 0; !focus && i < spec.buttons.size(); ++i) {
         if (spec.buttons[i].id == (spec.focus_id ? spec.focus_id : primary)) focus = state.buttons[i];
     }
@@ -652,6 +633,15 @@ int run_dialog(HWND owner, Dialog& spec) {
         GetWindowTextW(state.field, value.data(), length + 1);
         value.resize(static_cast<std::size_t>(length));
         spec.field_value = std::move(value);
+    }
+    if (state.result != spec.cancel_id) {
+        if (state.checkbox) spec.checked = SendMessageW(state.checkbox, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        if (state.choices) {
+            const auto count = SendMessageW(state.choices, LB_GETSELCOUNT, 0, 0);
+            spec.selected.resize(count > 0 ? static_cast<std::size_t>(count) : 0);
+            if (count > 0) SendMessageW(state.choices, LB_GETSELITEMS, count,
+                reinterpret_cast<LPARAM>(spec.selected.data()));
+        }
     }
     if (owner) EnableWindow(owner, TRUE);
     DestroyWindow(window);

@@ -4,10 +4,8 @@
 #include "nso_album_sync/game_aliases.hpp"
 #include "nso_album_sync/util.hpp"
 
-#ifdef _WIN32
 #include "import_windows.hpp"
 #include "nso_album_sync/windows_compat.hpp"
-#endif
 
 #include <algorithm>
 #include <chrono>
@@ -30,10 +28,13 @@ constexpr std::int64_t kMaxMediaDownloadBytes = 256LL * 1024LL * 1024LL;
 struct ExistingAlbumIndex {
     std::set<std::string> filenames_and_prefixes;
     std::unordered_map<std::string, std::string> folder_by_timestamp_prefix;
-#ifdef _WIN32
     std::unordered_map<std::string, std::filesystem::path> device_capture_by_key;
-#endif
 };
+
+bool is_workspace(const std::filesystem::path& path) {
+    const auto name = path_to_utf8(path.filename());
+    return name.starts_with(".switch-album-sync-import-") || name.starts_with(".switch-album-sync-share-");
+}
 
 bool should_cancel(const std::function<bool()>& cancelled) {
     return cancelled && cancelled();
@@ -129,11 +130,15 @@ std::vector<unsigned char> download_capture(HttpClient& http, const MediaItem& i
     const auto size = static_cast<std::size_t>(item.content_length);
     auto response = http.get(item.content_uri, {}, 60);
     if (response.status / 100 != 2) {
-        throw std::runtime_error("Media download failed (HTTP " +
-                                 std::to_string(response.status) + ")");
+        const auto message = "Media download failed (HTTP " + std::to_string(response.status) + ")";
+        if (response.status == 408 || response.status == 429 || response.status == 500 ||
+            response.status == 502 || response.status == 503 || response.status == 504) {
+            throw TransientHttpError(message);
+        }
+        throw std::runtime_error(message);
     }
     if (response.body.size() != size) {
-        throw std::runtime_error("Media download size did not match Nintendo's content length");
+        throw TransientHttpError("Media download size did not match Nintendo's content length");
     }
     return std::move(response.body);
 }
@@ -144,7 +149,7 @@ void write_capture(
     const std::function<bool()>& cancelled) {
     auto temporary = destination;
     // A user can deliberately point both apps at the same album.
-    temporary += ".capturedock.part";
+    temporary += ".switch-album-sync.part";
     std::error_code cleanup_error;
     std::filesystem::remove(temporary, cleanup_error);
     if (cleanup_error) throw std::runtime_error("Could not remove a partial media file");
@@ -354,11 +359,7 @@ std::string capture_timestamp_prefix(std::int64_t timestamp) {
     const auto seconds = timestamp > 10'000'000'000LL ? timestamp / 1000 : timestamp;
     const auto time = static_cast<std::time_t>(seconds);
     std::tm local_time{};
-#ifdef _WIN32
     localtime_s(&local_time, &time);
-#else
-    localtime_r(&time, &local_time);
-#endif
     char buffer[32];
     std::strftime(buffer, sizeof(buffer), "%Y%m%d%H%M%S", &local_time);
     return std::string(buffer) + "00";
@@ -382,12 +383,13 @@ ExistingAlbumIndex index_existing_album(
     const std::filesystem::path& root,
     const std::function<bool()>& cancelled) {
     ExistingAlbumIndex index;
+    const bool flat_default = is_default_album_folder(root);
     for (auto iterator = std::filesystem::recursive_directory_iterator(
              root, std::filesystem::directory_options::skip_permission_denied);
          iterator != std::filesystem::recursive_directory_iterator();
          ++iterator) {
         throw_if_cancelled(cancelled);
-        if (iterator->is_directory() && path_to_utf8(iterator->path().filename()).starts_with(".capturedock-import-")) {
+        if (iterator->is_directory() && is_workspace(iterator->path())) {
             iterator.disable_recursion_pending();
             continue;
         }
@@ -403,17 +405,18 @@ ExistingAlbumIndex index_existing_album(
         const auto& path = iterator->path();
         const auto filename = path_to_utf8(path.filename());
         const auto prefix = prefix_from_existing_filename(path);
-#ifdef _WIN32
         if (prefix.size() == 16 && filename.size() >= 53 && filename[16] == '-') {
             auto extension = lower(path_to_utf8(path.extension()));
             if (extension == ".jpeg") extension = ".jpg";
             index.device_capture_by_key.try_emplace(prefix.substr(0, 14) + extension, path);
         }
-#endif
         index.filenames_and_prefixes.insert(lower(filename));
         index.filenames_and_prefixes.insert(lower(prefix));
-        index.folder_by_timestamp_prefix.emplace(
-            lower(prefix), path_to_utf8(path.parent_path().filename()));
+        const auto parent = path.parent_path();
+        if (!flat_default || (parent != root && parent != root / "Album")) {
+            index.folder_by_timestamp_prefix.emplace(
+                lower(prefix), path_to_utf8(parent.filename()));
+        }
     }
     return index;
 }
@@ -444,7 +447,6 @@ void preserve_capture_timestamp(
             timestamp > 10'000'000'000LL ? timestamp / 1000 : timestamp;
         const auto seconds = std::chrono::seconds(seconds_value);
         const auto capture_time = std::chrono::system_clock::time_point(seconds);
-#ifdef _WIN32
         constexpr std::uint64_t kUnixToWindowsEpochSeconds = 11'644'473'600ULL;
         if (seconds_value >= 0) {
             ULARGE_INTEGER raw_time{};
@@ -463,7 +465,6 @@ void preserve_capture_timestamp(
                 CloseHandle(file);
             }
         }
-#endif
         const auto file_time =
             std::filesystem::file_time_type::clock::now() +
             (capture_time - std::chrono::system_clock::now());
@@ -475,9 +476,18 @@ void preserve_capture_timestamp(
 }  // namespace
 
 std::filesystem::path album_directory(const std::filesystem::path& destination) {
-    auto root = destination.empty() ? path_from_utf8(default_album_folder()) : destination;
+    if (destination.empty()) return path_from_utf8(default_album_folder());
+    auto root = destination;
     if (!root.has_filename() && root.has_relative_path()) root = root.parent_path();
-    return lower(path_to_utf8(root.filename())) == "album" ? root : root / "Album";
+    return is_default_album_folder(root) || lower(path_to_utf8(root.filename())) == "album"
+        ? root : root / "Album";
+}
+
+bool is_default_album_folder(const std::filesystem::path& folder) {
+    const auto default_folder = path_from_utf8(default_album_folder());
+    if (folder.lexically_normal() == default_folder.lexically_normal()) return true;
+    std::error_code error;
+    return std::filesystem::equivalent(folder, default_folder, error);
 }
 
 std::vector<LocalCapture> scan_capture_library(
@@ -485,6 +495,7 @@ std::vector<LocalCapture> scan_capture_library(
     std::error_code error;
     auto album = std::filesystem::absolute(album_directory(destination), error).lexically_normal().make_preferred();
     if (error) return {};
+    const auto legacy = is_default_album_folder(album) ? album / "Album" : std::filesystem::path{};
     std::vector<LocalCapture> captures;
     const auto file_now = std::filesystem::file_time_type::clock::now();
     const auto system_now = std::chrono::system_clock::now();
@@ -494,7 +505,7 @@ std::vector<LocalCapture> scan_capture_library(
     for (; iterator != end; iterator.increment(error)) {
         if (should_cancel(cancelled)) return {};
         const auto& entry = *iterator;
-        if (entry.is_directory(error) && !error && path_to_utf8(entry.path().filename()).starts_with(".capturedock-import-")) {
+        if (entry.is_directory(error) && !error && is_workspace(entry.path())) {
             iterator.disable_recursion_pending();
             continue;
         }
@@ -506,12 +517,14 @@ std::vector<LocalCapture> scan_capture_library(
         if (!bytes || error) continue;
         const auto modified = entry.last_write_time(error);
         if (error) continue;
-        const auto relative = entry.path().lexically_relative(album);
+        auto relative = entry.path().lexically_relative(album);
+        if (!legacy.empty() && relative.has_parent_path() && *relative.begin() == legacy.filename()) {
+            relative = entry.path().lexically_relative(legacy);
+        }
         const auto folder = relative.has_parent_path() ? album / *relative.begin() : album;
         const auto timestamp = std::chrono::floor<std::chrono::seconds>(
             system_now + (modified - file_now)).time_since_epoch().count();
         std::int64_t added_ms = 0;
-#ifdef _WIN32
         WIN32_FILE_ATTRIBUTE_DATA attributes{};
         if (GetFileAttributesExW(entry.path().c_str(), GetFileExInfoStandard, &attributes)) {
             const auto& created = attributes.ftCreationTime;
@@ -519,7 +532,6 @@ std::vector<LocalCapture> scan_capture_library(
             constexpr std::uint64_t unix_epoch = 116444736000000000ULL;
             if (ticks >= unix_epoch) added_ms = static_cast<std::int64_t>((ticks - unix_epoch) / 10000);
         }
-#endif
         captures.push_back({entry.path(), folder, timestamp, bytes, video, added_ms});
     }
     std::sort(captures.begin(), captures.end(), [](const LocalCapture& left, const LocalCapture& right) {
@@ -686,15 +698,10 @@ SyncResult SyncEngine::sync(
 
         const bool existing_filename = existing.filenames_and_prefixes.contains(filename_lower);
         const bool existing_timestamp = existing.filenames_and_prefixes.contains(prefix_lower);
-#ifdef _WIN32
         const auto device_match = existing.device_capture_by_key.find(prefix.substr(0, 14) + "." + extension);
         const bool can_review = !existing_filename && device_match != existing.device_capture_by_key.end();
         const bool reviewed = can_review && recorded_online_match(album, path_from_utf8(filename));
         const bool review = can_review && !reviewed;
-#else
-        constexpr bool reviewed = false;
-        constexpr bool review = false;
-#endif
         if (!review && (existing_filename || existing_timestamp || reviewed)) {
             ++result.skipped;
             result.items.push_back({label, "Skipped", {}});
@@ -706,7 +713,6 @@ SyncResult SyncEngine::sync(
         try {
             validate_media_item_for_download(item);
 
-#ifdef _WIN32
             if (review) {
                 const auto body = download_capture(http_, item);
                 throw_if_cancelled(cancelled);
@@ -720,7 +726,6 @@ SyncResult SyncEngine::sync(
                 report(SyncStage::downloading);
                 continue;
             }
-#endif
             failure = SyncFailure::storage;
             const auto known_folder = title_folders.find(lower(item.title_id));
             const auto game_folder = known_folder == title_folders.end()
@@ -741,14 +746,16 @@ SyncResult SyncEngine::sync(
             ++result.new_downloads;
             result.downloaded_paths.push_back(destination);
             result.items.push_back({label, "Downloaded", {}});
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error& error) {
             throw_if_cancelled(cancelled);
             ++result.failed;
             if (result.failure == SyncFailure::none || failure == SyncFailure::storage) {
                 result.failure = failure;
             }
             auto retry_id = media_retry_id(item);
-            result.items.push_back({label, failure == SyncFailure::storage ? "Save failed" : "Download failed", retry_id});
+            const bool transient = dynamic_cast<const TransientHttpError*>(&error) != nullptr;
+            result.items.push_back({label, failure == SyncFailure::storage ? "Save failed" : "Download failed",
+                                    retry_id, transient});
             if (!retry_id.empty()) result.failed_ids.push_back(std::move(retry_id));
         }
         report(SyncStage::downloading);

@@ -1,6 +1,5 @@
 #include "nso_album_sync/auth_callback.hpp"
 
-#ifdef _WIN32
 
 #include "nso_album_sync/windows_compat.hpp"
 
@@ -19,7 +18,7 @@ constexpr wchar_t kUserChoiceKey[] =
     L"npf71b963c1b7b6d119\\UserChoice";
 constexpr wchar_t kCommandKey[] = L"shell\\open\\command";
 constexpr wchar_t kHandlerDescription[] =
-    L"URL:CaptureDock Nintendo Account callback";
+    L"URL:Switch Album Sync Nintendo Account callback";
 std::mutex g_protocol_mutex;
 std::wstring g_registered_command;
 
@@ -135,5 +134,3 @@ void unregister_nintendo_auth_protocol() {
 }
 
 }  // namespace nso
-
-#endif  // _WIN32

@@ -12,25 +12,18 @@
 #include <limits>
 #include <stdexcept>
 
-#ifndef _WIN32
-#include <sys/stat.h>
-#else
 #include "nso_album_sync/windows_compat.hpp"
 #include <shlobj.h>
 #include <wincrypt.h>
-#endif
 
 namespace nso {
 namespace {
 
 constexpr char kSecureStoreAccount[] = "NintendoAccount";
 constexpr char kSecureMarker[] = "secure:v1";
-constexpr char kMacKeychainMarker[] = "keychain:v1";
-constexpr char kLinuxSecretServiceMarker[] = "secret-service:v1";
 constexpr char kVolatileMarker[] = "volatile:v1";
 
 std::string environment_variable(const char* name) {
-#ifdef _WIN32
     wchar_t* value = nullptr;
     std::size_t length = 0;
     const std::wstring wide_name(name, name + std::char_traits<char>::length(name));
@@ -40,46 +33,24 @@ std::string environment_variable(const char* name) {
     const auto result = path_to_utf8(std::filesystem::path(value));
     std::free(value);
     return result;
-#else
-    const char* value = std::getenv(name);
-    return value != nullptr ? std::string(value) : std::string{};
-#endif
 }
 
 std::filesystem::path config_directory() {
-#ifdef _WIN32
     const auto app_data = environment_variable("APPDATA");
-    return path_from_utf8(app_data.empty() ? "." : app_data) / "CaptureDock";
-#elif __APPLE__
-    const auto home = environment_variable("HOME");
-    return std::filesystem::path(home.empty() ? "." : home) /
-           "Library" / "Application Support" / "CaptureDock";
-#else
-    const auto xdg_config_home = environment_variable("XDG_CONFIG_HOME");
-    if (!xdg_config_home.empty()) {
-        return std::filesystem::path(xdg_config_home) / "CaptureDock";
-    }
-    const auto home = environment_variable("HOME");
-    return std::filesystem::path(home.empty() ? "." : home) /
-           ".config" / "CaptureDock";
-#endif
+    return path_from_utf8(app_data.empty() ? "." : app_data) / "Switch Album Sync";
 }
 }  // namespace
 
 std::string default_album_folder() {
-#ifdef _WIN32
     wchar_t pictures[MAX_PATH]{};
     if (SUCCEEDED(SHGetFolderPathW(
             nullptr, CSIDL_MYPICTURES, nullptr, SHGFP_TYPE_CURRENT, pictures)) &&
         pictures[0] != L'\0') {
-        return path_to_utf8(std::filesystem::path(pictures) / L"CaptureDock");
+        return path_to_utf8(std::filesystem::path(pictures) / L"Switch Album Sync");
     }
     const auto home = environment_variable("USERPROFILE");
-#else
-    const auto home = environment_variable("HOME");
-#endif
     const auto base = path_from_utf8(home.empty() ? "." : home);
-    return path_to_utf8(base / "Pictures" / "CaptureDock");
+    return path_to_utf8(base / "Pictures" / "Switch Album Sync");
 }
 
 namespace {
@@ -127,11 +98,11 @@ std::string display_last_sync(const std::string& stored) {
 }
 
 bool is_secure_store_marker(const std::string& value) {
-    return value == kSecureMarker || value == kMacKeychainMarker ||
-           value == kLinuxSecretServiceMarker;
+    // Recognize old credential markers so a copied settings file cannot send
+    // a storage marker to Nintendo as though it were an authentication token.
+    return value == kSecureMarker || value == "keychain:v1" || value == "secret-service:v1";
 }
 
-#ifdef _WIN32
 std::string decrypt_legacy_dpapi_token(const std::string& value) {
     constexpr char kPrefix[] = "dpapi:";
     if (value.rfind(kPrefix, 0) != 0) return {};
@@ -162,12 +133,10 @@ std::string decrypt_legacy_dpapi_token(const std::string& value) {
     LocalFree(output.pbData);
     return plain;
 }
-#endif
 
 void replace_config_file(
     const std::filesystem::path& temporary,
     const std::filesystem::path& target) {
-#ifdef _WIN32
     if (!MoveFileExW(
             temporary.c_str(),
             target.c_str(),
@@ -176,14 +145,6 @@ void replace_config_file(
         std::filesystem::remove(temporary, ignored);
         throw std::runtime_error("Could not replace config.json");
     }
-#else
-    std::error_code error;
-    std::filesystem::rename(temporary, target, error);
-    if (error) {
-        std::filesystem::remove(temporary, error);
-        throw std::runtime_error("Could not replace config.json");
-    }
-#endif
 }
 
 }  // namespace
@@ -233,9 +194,6 @@ void ConfigManager::load() {
     legacy_session_marker_.clear();
     secure_marker_on_disk_ = false;
     std::filesystem::create_directories(directory_);
-#ifndef _WIN32
-    chmod(directory_.c_str(), 0700);
-#endif
 
     bool needs_config_rewrite = false;
 
@@ -251,6 +209,7 @@ void ConfigManager::load() {
                 json, "userNickname", "UserNickname", config_.user_nickname);
             config_.destination_folder = string_with_legacy_key(
                 json, "destinationFolder", "DestinationFolder", config_.destination_folder);
+            config_.watch_folder = json.string("watchFolder");
             // v1.0.0 defaulted auto-sync to enabled and respected an
             // explicitly saved AutoSyncEnabled/autoSync value. Preserve that
             // behavior across the C++ config migration.
@@ -294,7 +253,7 @@ void ConfigManager::load() {
                 json, "nxapiAuthClientId", "NxapiAuthClientId",
                 config_.nxapi_auth_client_id);
 
-            // Rich Presence uses CaptureDock's public application identity.
+            // Rich Presence uses Switch Album Sync's public application identity.
             // Older builds persisted this 64-bit snowflake as a
             // JSON number, which can lose precision because Json stores numbers
             // as doubles. Ignore and remove any legacy override instead.
@@ -316,12 +275,10 @@ void ConfigManager::load() {
                 }
             } else if (stored_session.empty() || stored_session == kVolatileMarker) {
                 config_.session_token.clear();
-#ifdef _WIN32
             } else if (stored_session.rfind("dpapi:", 0) == 0) {
                 config_.session_token = decrypt_legacy_dpapi_token(stored_session);
                 config_.session_storage = SessionStorage::legacy;
                 legacy_session_marker_ = stored_session;
-#endif
             } else {
                 config_.session_token = stored_session;
                 config_.session_storage = SessionStorage::legacy;
@@ -333,7 +290,7 @@ void ConfigManager::load() {
     }
 
     // Keep a corrupt/missing config from silently falling back to the process
-    // working directory, which can otherwise scatter an Album folder beside the exe.
+    // working directory, which can otherwise save captures beside the exe.
     if (config_.destination_folder.empty()) {
         config_.destination_folder = default_album_folder();
     }
@@ -362,9 +319,6 @@ void ConfigManager::load() {
 
 void ConfigManager::save_locked() {
     std::filesystem::create_directories(directory_);
-#ifndef _WIN32
-    chmod(directory_.c_str(), 0700);
-#endif
 
     std::string session_marker;
     const auto storage = config_.session_storage;
@@ -383,6 +337,7 @@ void ConfigManager::save_locked() {
         {"sessionToken", session_marker},
         {"userNickname", config_.user_nickname},
         {"destinationFolder", config_.destination_folder},
+        {"watchFolder", config_.watch_folder},
         {"autoSync", config_.auto_sync},
         {"autoSyncSettingVersion",
          static_cast<std::int64_t>(config_.auto_sync_setting_version)},
@@ -413,15 +368,9 @@ void ConfigManager::save_locked() {
         file.flush();
         if (!file) throw std::runtime_error("Could not write config.json");
     }
-#ifndef _WIN32
-    chmod(temporary.c_str(), 0600);
-#endif
     replace_config_file(temporary, config_file_);
     secure_marker_on_disk_ = secure_marker;
     if (storage != SessionStorage::legacy) legacy_session_marker_.clear();
-#ifndef _WIN32
-    chmod(config_file_.c_str(), 0600);
-#endif
 }
 
 void ConfigManager::save() {

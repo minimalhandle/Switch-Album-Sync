@@ -2,7 +2,6 @@ build/
 out/
 .vs/
 .idea/
-.DS_Store
 CMakeUserPresets.json
 
 dist/

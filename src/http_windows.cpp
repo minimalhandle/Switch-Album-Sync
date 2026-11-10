@@ -1,7 +1,6 @@
 #include "nso_album_sync/http.hpp"
 #include "nso_album_sync/util.hpp"
 
-#ifdef _WIN32
 
 #include "nso_album_sync/windows_compat.hpp"
 #include <winhttp.h>
@@ -145,9 +144,17 @@ std::string wide_to_utf8(const std::wstring& text) {
 }
 
 [[noreturn]] void throw_winhttp_error(const char* operation) {
-    throw std::runtime_error(
-        std::string(operation) + " failed (WinHTTP error " +
-        std::to_string(GetLastError()) + ")");
+    const auto code = GetLastError();
+    const auto message = std::string(operation) + " failed (WinHTTP error " + std::to_string(code) + ")";
+    switch (code) {
+        case ERROR_WINHTTP_TIMEOUT:
+        case ERROR_WINHTTP_CANNOT_CONNECT:
+        case ERROR_WINHTTP_CONNECTION_ERROR:
+        case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+            throw TransientHttpError(message);
+        default:
+            throw std::runtime_error(message);
+    }
 }
 
 ParsedUrl parse_url(const std::string& url) {
@@ -398,7 +405,7 @@ HttpResponse HttpClient::request(
     }
 
     InternetHandle session(WinHttpOpen(
-        L"CaptureDock/2.0",
+        L"Switch Album Sync/2.0",
         access_type,
         proxy_name,
         proxy_bypass,
@@ -554,5 +561,3 @@ std::string HttpClient::form_encode(
 }
 
 }  // namespace nso
-
-#endif  // _WIN32

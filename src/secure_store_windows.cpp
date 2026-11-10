@@ -1,6 +1,5 @@
 #include "nso_album_sync/secure_store.hpp"
 
-#ifdef _WIN32
 
 #include "nso_album_sync/windows_compat.hpp"
 #include <wincred.h>
@@ -39,7 +38,7 @@ std::wstring utf8_to_wide(const std::string& text) {
 }
 
 std::wstring credential_target(const std::string& account) {
-    return L"CaptureDock/" + utf8_to_wide(account);
+    return L"Switch Album Sync/" + utf8_to_wide(account);
 }
 
 }  // namespace
@@ -92,5 +91,3 @@ void SecureStore::erase(const std::string& account) {
 }
 
 }  // namespace nso
-
-#endif  // _WIN32

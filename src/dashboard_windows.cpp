@@ -19,14 +19,14 @@
 namespace nso {
 namespace {
 
-constexpr wchar_t kDashboardClass[] = L"CaptureDockDashboard";
-constexpr wchar_t kTitle[] = L"CaptureDock";
+constexpr wchar_t kDashboardClass[] = L"SwitchAlbumSyncDashboard";
+constexpr wchar_t kTitle[] = L"Switch Album Sync";
 constexpr UINT kShowDashboard = WM_APP + 60;
 constexpr UINT kThumbnailsReady = WM_APP + 61;
 constexpr UINT_PTR kFeedbackTimer = 1;
 constexpr int kWidth = 704;
 constexpr int kMinimumWidth = 610;
-constexpr int kBannerHeight = 84;
+constexpr int kBannerHeight = 88;
 constexpr int kCardPadding = 12;
 constexpr int kCardGap = 8;
 constexpr int kMargin = 24;
@@ -41,16 +41,17 @@ bool high_contrast_enabled() {
 }
 
 enum Control {
-    Title, Subtitle, RuleAccount, AccountHeading, AccountStatus, AccountAction,
-    CredentialNote, ClearCredential, RuleAlbum, AlbumHeading, Destination,
+    Title, Subtitle, AccountHeading, AccountStatus, AccountAction,
+    CredentialNote, ClearCredential, AlbumHeading, Destination,
     ChooseFolder, OpenFolder, LastSync, NextSync, SyncStatus, SyncDetail,
-    Progress, SyncNow, RetryFailed, AutoSync, RuleCaptures, CapturesHeading,
-    CopyLatest, ShowInFolder, Captures, EmptyCaptures, RuleSettings,
+    Progress, SyncNow, RetryFailed, AutoSync, CapturesHeading,
+    CopyLatest, ShowInFolder, Captures, EmptyCaptures, AlbumActions, CaptureActions, DiscordSettings,
     DiscordHeading, DiscordToggle, DiscordUnavailable, CopyDiagnostics,
     Feedback, PasteSignIn, OpenLibrary, OpenHistory, OpenStorage, ImportCaptures, OpenDuplicates,
     DiscordUsername, DiscordPicture, DiscordPlayTime, DiscordZelda, DiscordAnimalCrossing,
     DiscordSplatoon3, DiscordSplatoon2, DiscordRefresh, DiscordHint,
     DiscordProfileHeading, DiscordGamesHeading, DiscordZeldaGames, ControlCount,
+    ChooseWatchFolder, StopWatchingFolder,
 };
 
 constexpr struct DiscordOption {
@@ -270,7 +271,8 @@ struct WindowsDashboard::Impl {
     MenuState state;
     UINT dpi = 96;
     int scroll = 0;
-    bool discord_expanded() const { return state.discord_available && state.discord; }
+    bool discord_settings_open = false;
+    bool discord_expanded() const { return state.discord_available && discord_settings_open; }
     int content_height() const { return px(arrange(kMinimumWidth - kMargin).height); }
 
     void fit_height() {
@@ -326,25 +328,12 @@ struct WindowsDashboard::Impl {
 
     void create_controls() {
         label(Title, kTitle);
-        label(Subtitle, L"Keep your Nintendo Switch captures in a local album.");
-        button(OpenLibrary, L"Capture library");
-        button(OpenHistory, L"Sync history");
-        button(OpenStorage, L"Storage");
+        label(Subtitle, L"Sync your Nintendo Switch album to this PC.");
+        button(OpenLibrary, L"Open library");
         button(ImportCaptures, L"Import USB / SD…");
-        button(OpenDuplicates, L"Duplicate review");
-        label(RuleAccount, L"", SS_ETCHEDHORZ);
-        label(AccountHeading, L"Nintendo Account");
-        label(AccountStatus);
-        button(PasteSignIn, L"Paste sign-in link…");
-        button(AccountAction, L"Sign in…");
-        label(CredentialNote);
-        button(ClearCredential, L"Clear saved credential");
-        label(RuleAlbum, L"", SS_ETCHEDHORZ);
-        label(AlbumHeading, L"Album folder and sync");
-        control(Destination, L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL,
-                WS_EX_CLIENTEDGE);
-        button(ChooseFolder, L"Choose folder…");
-        button(OpenFolder, L"Open folder");
+        button(AlbumActions, L"Album tools ▾");
+        label(AlbumHeading, L"Album sync");
+        control(Destination, L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL);
         label(LastSync);
         label(NextSync);
         label(SyncStatus);
@@ -353,37 +342,33 @@ struct WindowsDashboard::Impl {
         button(SyncNow, L"Sync now", BS_DEFPUSHBUTTON);
         button(RetryFailed, L"Retry failed");
         button(AutoSync, L"Auto-sync", BS_AUTOCHECKBOX);
-        label(RuleCaptures, L"", SS_ETCHEDHORZ);
         label(CapturesHeading, L"Recent captures");
-        button(CopyLatest, L"Copy latest");
-        button(ShowInFolder, L"Show in folder");
+        button(CaptureActions, L"Capture actions ▾");
         control(Captures, WC_LISTVIEWW, L"Recent captures",
                 WS_TABSTOP | LVS_ICON | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_AUTOARRANGE |
                 LVS_SHAREIMAGELISTS | LVS_NOLABELWRAP);
         ListView_SetExtendedListViewStyle(controls[Captures], LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
         label(EmptyCaptures);
-        label(RuleSettings, L"", SS_ETCHEDHORZ);
+        label(AccountHeading, L"Nintendo Account");
+        label(AccountStatus);
+        button(AccountAction, L"Sign in…");
+        button(PasteSignIn, L"Paste sign-in link…");
+        label(CredentialNote);
+        button(ClearCredential, L"Clear saved credential");
         label(DiscordHeading, L"Discord Rich Presence");
         button(DiscordToggle, L"Enable Rich Presence", BS_AUTOCHECKBOX);
+        button(DiscordSettings, L"Settings ▾");
         for (const auto& option : kDiscordOptions) button(option.control, option.label, BS_AUTOCHECKBOX);
         button(DiscordRefresh, L"Refresh presence");
         label(DiscordHint, L"Discord desktop must be running. Visibility follows Discord Activity Sharing.");
         label(DiscordProfileHeading, L"Profile and play time");
         label(DiscordGamesHeading, L"Game details");
-        label(DiscordZeldaGames, L"Zelda Notes live location in CaptureDock\nOcarina of Time (Switch 2)\nBreath of the Wild and Tears of the Kingdom (Switch 2 Editions)");
+        label(DiscordZeldaGames, L"Zelda Notes live location in Switch Album Sync\nOcarina of Time (Switch 2)\nBreath of the Wild and Tears of the Kingdom (Switch 2 Editions)");
         label(DiscordUnavailable, L"Unavailable in this build.");
-        button(CopyDiagnostics, L"Copy diagnostics");
         label(Feedback, L"", SS_RIGHT);
-        for (const auto rule : {RuleAccount, RuleAlbum, RuleCaptures, RuleSettings}) {
-            ShowWindow(controls[rule], SW_HIDE);
-        }
         set_fonts();
         theme::apply(window, theme::Caption::red);
         theme::set_primary(controls[SyncNow]);
-        if (!theme::high_contrast()) {
-            ListView_SetBkColor(controls[Captures], theme::kCard);
-            ListView_SetTextBkColor(controls[Captures], theme::kCard);
-        }
         update(state);
     }
 
@@ -436,19 +421,14 @@ struct WindowsDashboard::Impl {
             put(id, right - inset, top, width, height);
         };
         int y = 18;
-        put(Title, left, y, span, 36);
-        put(Subtitle, left, y + 38, span, 22);
+        put(Title, left, y, span, 38);
+        put(Subtitle, left, y + 42, span, 22);
 
-        y = kBannerHeight + 12;
-        const struct { Control id; int width; } nav[] = {
-            {OpenLibrary, 116}, {OpenHistory, 90}, {OpenStorage, 68}, {ImportCaptures, 142}, {OpenDuplicates, 124},
-        };
-        int x = left;
-        for (const auto& button : nav) {
-            put(button.id, x, y, button.width, 31);
-            x += button.width + 8;
-        }
-        y += 31 + kCardGap;
+        y = kBannerHeight + 10;
+        put(OpenLibrary, left, y, 112, 32);
+        put(ImportCaptures, left + 120, y, 140, 32);
+        put_right(AlbumActions, 126, y, 126, 32);
+        y += 44;
 
         int card_top = 0;
         const auto open_card = [&] {
@@ -462,56 +442,59 @@ struct WindowsDashboard::Impl {
         };
 
         open_card();
-        put(AccountHeading, left, y, span - 130, 20);
-        put_right(PasteSignIn, 280, y + 10, 153, 29);
-        put_right(AccountAction, 118, y + 10, 118, 29);
-        y += 24;
-        put(AccountStatus, left, y, span - (state.manual_sign_in ? 289 : 130), 31);
-        y += 31;
-        put(CredentialNote, left, y, span - (state.legacy_credential ? 177 : 0), 34);
-        put_right(ClearCredential, 166, y, 166, 28);
-        y += 34;
-        close_card();
-
-        open_card();
-        put(AlbumHeading, left, y, span, 20);
-        y += 26;
-        put(Destination, left, y, span - 221, 28);
-        put_right(ChooseFolder, 212, y, 112, 28);
-        put_right(OpenFolder, 92, y, 92, 28);
-        y += 37;
+        put(AlbumHeading, left, y + 5, span - 222, 22);
+        put_right(SyncNow, 106, y, 106, 32);
+        put_right(RetryFailed, 218, y, 104, 32);
+        y += 42;
+        put(SyncStatus, left, y, span, 38);
+        y += 38;
+        if (!state.sync_detail.empty()) {
+            put(SyncDetail, left, y, span, 20);
+            y += 24;
+        }
+        if (state.sync_busy) {
+            put(Progress, left, y, span, 8);
+            y += 16;
+        }
+        put(Destination, left, y, span, 26);
+        y += 33;
         put(LastSync, left, y, half - 8, 21);
         put(NextSync, left + half, y, half, 21);
-        y += 25;
-        put(SyncStatus, left, y, span, 41);
-        y += 43;
-        put(SyncDetail, left, y, span, 18);
-        y += 18;
-        put(Progress, left, y, span, 8);
-        y += 18;
-        put(SyncNow, left, y, 100, 29);
-        put(RetryFailed, left + 108, y, 102, 29);
-        put_right(AutoSync, 184, y, 184, 29);
-        y += 29;
+        y += 23;
+        put(AutoSync, left, y, 184, 27);
+        y += 27;
         close_card();
 
         open_card();
-        put(CapturesHeading, left, y + 3, span - 242, 21);
-        put_right(CopyLatest, 230, y - 3, 104, 28);
-        put_right(ShowInFolder, 118, y - 3, 118, 28);
+        put(CapturesHeading, left, y + 3, span - 304, 21);
+        put_right(CaptureActions, 145, y - 3, 145, 28);
+        put_right(Feedback, 303, y + 2, 150, 24);
         y += 32;
         put(Captures, left, y, span, 103);
         put(EmptyCaptures, left, y + 6, span, 42);
-        y += 103;
+        y += state.recent_captures.empty() ? 45 : 103;
         close_card();
 
         open_card();
-        put(DiscordHeading, left, y - 4, span - 270, 22);
-        put_right(CopyDiagnostics, 128, y + 3, 128, 29);
-        put_right(Feedback, 295, y + 7, 156, 24);
-        y += 18;
-        put(DiscordToggle, left, y, span - 270, 25);
-        put(DiscordUnavailable, left, y + 3, span - 270, 20);
+        put(AccountHeading, left, y + 2, span - 130, 20);
+        put_right(AccountAction, 118, y + 2, 118, 29);
+        put_right(PasteSignIn, 280, y + 2, 153, 29);
+        y += 25;
+        put(AccountStatus, left, y, span - (state.manual_sign_in ? 289 : 130), 30);
+        y += 30;
+        if (!state.signed_in || state.credential_warning) {
+            put(CredentialNote, left, y, span - (state.legacy_credential ? 177 : 0), 36);
+            put_right(ClearCredential, 166, y, 166, 28);
+            y += 36;
+        }
+        close_card();
+
+        open_card();
+        put(DiscordHeading, left, y + 1, span - 128, 22);
+        put_right(DiscordSettings, 112, y, 112, 29);
+        y += 24;
+        put(DiscordToggle, left, y, span - 128, 25);
+        put(DiscordUnavailable, left, y + 3, span - 128, 20);
         y += 25;
         if (discord_expanded()) {
             y += 5;
@@ -537,12 +520,14 @@ struct WindowsDashboard::Impl {
         return result;
     }
 
-    void layout(int desired_scroll) {
+    void layout(int desired_scroll, bool scrolling = false) {
         RECT client{};
         GetClientRect(window, &client);
         SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS};
         info.nMax = content_height() - 1;
         info.nPage = static_cast<UINT>(std::max(0L, client.bottom));
+        const int maximum = std::max(0, info.nMax - std::max(0, static_cast<int>(info.nPage) - 1));
+        if (scrolling && std::clamp(desired_scroll, 0, maximum) == scroll) return;
         info.nPos = desired_scroll;
         SetScrollInfo(window, SB_VERT, &info, TRUE);
         scroll = GetScrollPos(window, SB_VERT);
@@ -551,12 +536,24 @@ struct WindowsDashboard::Impl {
                                   MulDiv(client.right, 96, static_cast<int>(dpi)) - kMargin);
         const auto plan = arrange(right);
         cards = plan.cards;
-        for (const auto& item : plan.items) {
+        const auto place = [&](const Placement& item, HDWP batch) {
             const auto& r = item.bounds;
-            MoveWindow(controls[item.id], px(r.left), px(r.top) - scroll,
-                       px(r.right - r.left), px(r.bottom - r.top), TRUE);
+            constexpr UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;
+            const int x = px(r.left), y = px(r.top) - scroll;
+            const int width = px(r.right - r.left), height = px(r.bottom - r.top);
+            if (batch) return DeferWindowPos(batch, controls[item.id], nullptr, x, y, width, height, flags);
+            SetWindowPos(controls[item.id], nullptr, x, y, width, height, flags);
+            return HDWP{};
+        };
+        HDWP batch = BeginDeferWindowPos(static_cast<int>(plan.items.size()));
+        for (const auto& item : plan.items) {
+            if (!batch) break;
+            batch = place(item, batch);
         }
-        InvalidateRect(window, nullptr, TRUE);
+        if (!batch || !EndDeferWindowPos(batch)) {
+            for (const auto& item : plan.items) place(item, nullptr);
+        }
+        RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
     void refresh_captures(bool force = false) {
@@ -607,9 +604,12 @@ struct WindowsDashboard::Impl {
     }
 
     void update(const MenuState& next) {
-        const bool resize = discord_expanded() != (next.discord_available && next.discord);
-        const bool relayout = state.legacy_credential != next.legacy_credential ||
-            state.manual_sign_in != next.manual_sign_in || state.discord_available != next.discord_available;
+        const bool resize = state.discord_available != next.discord_available ||
+            state.signed_in != next.signed_in || state.credential_warning != next.credential_warning ||
+            state.recent_captures.empty() != next.recent_captures.empty();
+        const bool relayout = state.manual_sign_in != next.manual_sign_in ||
+            state.sync_busy != next.sync_busy || state.sync_detail.empty() != next.sync_detail.empty() ||
+            state.legacy_credential != next.legacy_credential;
         state = next;
         library.update(state);
         if (!window) return;
@@ -627,16 +627,18 @@ struct WindowsDashboard::Impl {
             L"Sign-in uses nxapi, a third-party service that processes Nintendo tokens, "
             L"account details and Coral API traffic. Details appear before you continue.");
         ShowWindow(controls[ClearCredential], state.legacy_credential ? SW_SHOWNA : SW_HIDE);
+        ShowWindow(controls[CredentialNote], !state.signed_in || state.credential_warning ? SW_SHOWNA : SW_HIDE);
 
         text(Destination, state.destination.wstring());
-        EnableWindow(controls[OpenFolder], !state.destination.empty());
-        text(LastSync, L"Last successful sync  ·  " + wide(state.last_sync));
-        text(NextSync, L"Next scheduled sync  ·  " + wide(state.next_sync));
+        text(LastSync, L"Last sync  ·  " + wide(state.last_sync));
+        text(NextSync, L"Next sync  ·  " + wide(state.next_sync));
         text(SyncStatus, wide(state.status));
         text(SyncDetail, wide(state.sync_detail));
         EnableWindow(controls[SyncNow], state.signed_in && !state.sync_busy);
         EnableWindow(controls[ImportCaptures], !state.sync_busy);
-        EnableWindow(controls[RetryFailed], state.signed_in && !state.sync_busy && state.retry_available);
+        ShowWindow(controls[RetryFailed], state.retry_available ? SW_SHOWNA : SW_HIDE);
+        EnableWindow(controls[RetryFailed], state.signed_in && !state.sync_busy);
+        ShowWindow(controls[SyncDetail], state.sync_detail.empty() ? SW_HIDE : SW_SHOWNA);
         SendMessageW(controls[AutoSync], BM_SETCHECK, state.auto_sync ? BST_CHECKED : BST_UNCHECKED, 0);
         text(AutoSync, L"Auto-sync (" + std::to_wstring(state.sync_interval_minutes) + L" min)");
 
@@ -661,10 +663,10 @@ struct WindowsDashboard::Impl {
         ShowWindow(controls[EmptyCaptures], has_captures ? SW_HIDE : SW_SHOWNA);
         text(EmptyCaptures, state.recent_loading ? L"Checking the album folder for captures…" :
             L"No captures in this album yet. New downloads will appear here.");
-        EnableWindow(controls[CopyLatest], has_captures);
-        EnableWindow(controls[ShowInFolder], !selected_capture().empty());
+        EnableWindow(controls[CaptureActions], has_captures);
 
         ShowWindow(controls[DiscordToggle], state.discord_available ? SW_SHOWNA : SW_HIDE);
+        ShowWindow(controls[DiscordSettings], state.discord_available ? SW_SHOWNA : SW_HIDE);
         ShowWindow(controls[DiscordUnavailable], state.discord_available ? SW_HIDE : SW_SHOWNA);
         SendMessageW(controls[DiscordToggle], BM_SETCHECK, state.discord ? BST_CHECKED : BST_UNCHECKED, 0);
         const int discord_visibility = discord_expanded() ? SW_SHOWNA : SW_HIDE;
@@ -681,7 +683,6 @@ struct WindowsDashboard::Impl {
             ShowWindow(controls[id], discord_visibility);
         }
         EnableWindow(controls[DiscordRefresh], state.discord && state.signed_in);
-        EnableWindow(controls[CopyDiagnostics], !state.diagnostics.empty());
         if (resize) fit_height();
         if (relayout || resize) layout(scroll);
     }
@@ -689,6 +690,35 @@ struct WindowsDashboard::Impl {
     void feedback(const wchar_t* message) {
         text(Feedback, message);
         SetTimer(window, kFeedbackTimer, 3500, nullptr);
+    }
+
+    void show_actions(Control anchor) {
+        HMENU menu = CreatePopupMenu();
+        if (!menu) return;
+        const auto add = [menu](Control id, const wchar_t* label, bool enabled = true) {
+            AppendMenuW(menu, MF_STRING | (enabled ? MF_ENABLED : MF_GRAYED), 2000 + id, label);
+        };
+        if (anchor == AlbumActions) {
+            add(OpenHistory, L"Sync history");
+            add(OpenStorage, L"Storage");
+            add(OpenDuplicates, L"Duplicate review");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            add(OpenFolder, L"Open album folder", !state.destination.empty());
+            add(ChooseFolder, L"Change album folder…");
+            add(ChooseWatchFolder, state.watching_folder ? L"Change watched folder…" : L"Watch a folder…");
+            if (state.watching_folder) add(StopWatchingFolder, L"Stop watching folder");
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            add(CopyDiagnostics, L"Copy diagnostics", !state.diagnostics.empty());
+        } else {
+            add(CopyLatest, L"Copy latest capture", !shown_captures.empty());
+            add(ShowInFolder, L"Show selected capture in folder", !selected_capture().empty());
+        }
+        RECT bounds{};
+        GetWindowRect(controls[anchor], &bounds);
+        const auto selected = TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTALIGN,
+            bounds.right, bounds.bottom, window, nullptr);
+        DestroyMenu(menu);
+        if (selected) command(static_cast<Control>(selected - 2000));
     }
 
     void command(Control id) {
@@ -699,11 +729,22 @@ struct WindowsDashboard::Impl {
             return;
         }
         switch (id) {
+            case AlbumActions:
+            case CaptureActions: show_actions(id); break;
+            case DiscordSettings:
+                discord_settings_open = !discord_settings_open;
+                text(DiscordSettings, discord_settings_open ? L"Settings ▴" : L"Settings ▾");
+                update(state);
+                fit_height();
+                layout(scroll);
+                break;
             case OpenLibrary: library.show(window, LibraryPage::captures, *callbacks); break;
             case OpenHistory: library.show(window, LibraryPage::history, *callbacks); break;
             case OpenStorage: library.show(window, LibraryPage::storage, *callbacks); break;
             case OpenDuplicates: library.show(window, LibraryPage::duplicates, *callbacks); break;
             case ImportCaptures: if (callbacks->import_captures) callbacks->import_captures(); break;
+            case ChooseWatchFolder: if (callbacks->choose_watch_folder) callbacks->choose_watch_folder(); break;
+            case StopWatchingFolder: if (callbacks->stop_watching_folder) callbacks->stop_watching_folder(); break;
             case AccountAction:
                 if (state.sign_in_pending) callbacks->cancel_sign_in();
                 else callbacks->sign_in_out();
@@ -808,11 +849,11 @@ struct WindowsDashboard::Impl {
                     }
                     default: break;
                 }
-                layout(position);
+                layout(position, true);
                 return 0;
             }
             case WM_MOUSEWHEEL:
-                layout(scroll - MulDiv(GET_WHEEL_DELTA_WPARAM(wp), px(72), WHEEL_DELTA));
+                layout(scroll - MulDiv(GET_WHEEL_DELTA_WPARAM(wp), px(72), WHEEL_DELTA), true);
                 return 0;
             case WM_COMMAND:
                 if (LOWORD(wp) == IDCANCEL) {
@@ -824,9 +865,6 @@ struct WindowsDashboard::Impl {
             case WM_NOTIFY: {
                 const auto* notice = reinterpret_cast<NMHDR*>(lp);
                 if (notice->hwndFrom == controls[Captures]) {
-                    if (notice->code == LVN_ITEMCHANGED) {
-                        EnableWindow(controls[ShowInFolder], !selected_capture().empty());
-                    }
                     if (notice->code == LVN_GETINFOTIPW) {
                         auto* tip = reinterpret_cast<NMLVGETINFOTIPW*>(lp);
                         if (tip->iItem >= 0 && static_cast<std::size_t>(tip->iItem) < shown_captures.size() &&
@@ -852,22 +890,20 @@ struct WindowsDashboard::Impl {
                     const int right = bounds.right - px(12);
                     const auto card = [&](int top, int bottom) {
                         theme::fill_round(dc, RECT{px(12), px(top) - scroll, right, px(bottom) - scroll},
-                                          px(14), theme::kCard);
+                                          px(14), theme::kCard, theme::kCardBorder);
                     };
                     for (const auto& [top, bottom] : cards) card(top, bottom);
-                    bounds.bottom = px(kBannerHeight) - scroll;
+                    const int banner_bottom = px(kBannerHeight) - scroll;
+                    bounds.bottom = banner_bottom;
                     FillRect(dc, &bounds, theme::brush(theme::kRed));
-                    bounds.top = bounds.bottom - px(3);
-                    FillRect(dc, &bounds, theme::brush(theme::kRedDeep));
                 }
                 return TRUE;
             }
             case WM_CTLCOLORBTN: {
                 if (high_contrast_enabled()) return DefWindowProcW(window, msg, wp, lp);
                 const auto child = reinterpret_cast<HWND>(lp);
-                const bool header = child == controls[OpenLibrary] || child == controls[OpenHistory] ||
-                    child == controls[OpenStorage] || child == controls[ImportCaptures] ||
-                    child == controls[OpenDuplicates];
+                const bool header = child == controls[OpenLibrary] || child == controls[ImportCaptures] ||
+                    child == controls[AlbumActions];
                 return theme::control_color(msg, wp, lp, header ? theme::kBackground : theme::kCard);
             }
             case WM_CTLCOLOREDIT:
@@ -883,7 +919,7 @@ struct WindowsDashboard::Impl {
                 }
                 const auto child = reinterpret_cast<HWND>(lp);
                 if (child == controls[Title] || child == controls[Subtitle]) {
-                    SetTextColor(dc, child == controls[Title] ? RGB(255, 255, 255) : RGB(255, 224, 227));
+                    SetTextColor(dc, RGB(255, 255, 255));
                     return reinterpret_cast<LRESULT>(theme::brush(theme::kRed));
                 }
                 const auto result = theme::control_color(msg, wp, lp, theme::kCard);
@@ -963,7 +999,7 @@ bool WindowsDashboard::create(HICON icon, const PlatformCallbacks& callbacks,
     MONITORINFO monitor{sizeof(monitor)};
     GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTOPRIMARY), &monitor);
     const auto& work = monitor.rcWork;
-    constexpr DWORD style = WS_OVERLAPPEDWINDOW | WS_VSCROLL;
+    constexpr DWORD style = WS_OVERLAPPEDWINDOW | WS_VSCROLL | WS_CLIPCHILDREN;
     constexpr DWORD ex_style = WS_EX_CONTROLPARENT;
     HWND window = CreateWindowExW(ex_style, kDashboardClass, kTitle, style,
         work.left, work.top, 0, 0, nullptr, nullptr, instance, impl_.get());

@@ -4,6 +4,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -11,6 +12,11 @@ namespace nso {
 
 inline constexpr std::size_t kDefaultGetResponseLimit =
     256ULL * 1024ULL * 1024ULL;
+
+class TransientHttpError : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 struct HttpResponse {
     long status = 0;

@@ -19,6 +19,7 @@ struct AppConfig {
     SessionStorage session_storage = SessionStorage::none;
     std::string user_nickname = "Nintendo Switch Player";
     std::string destination_folder;
+    std::string watch_folder;
 
     bool auto_sync = false;
     int auto_sync_setting_version = 1;

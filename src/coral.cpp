@@ -13,11 +13,7 @@
 #include <stdexcept>
 #include <utility>
 
-#ifdef _WIN32
 #include "nso_album_sync/windows_compat.hpp"
-#else
-#include <sys/stat.h>
-#endif
 
 namespace nso {
 namespace {
@@ -214,18 +210,12 @@ std::chrono::seconds retry_after_delay(const std::string& value) {
 void replace_cache_file(
     const std::filesystem::path& temporary,
     const std::filesystem::path& target) {
-#ifdef _WIN32
     if (!MoveFileExW(
             temporary.c_str(), target.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);
     }
-#else
-    std::error_code error;
-    std::filesystem::rename(temporary, target, error);
-    if (error) std::filesystem::remove(temporary, error);
-#endif
 }
 
 MediaItem parse_media_item(const Json& item) {

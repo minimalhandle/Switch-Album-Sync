@@ -33,7 +33,7 @@ void log_nooklink_failure(const std::string& stage) {
         static std::mutex log_mutex;
         std::lock_guard lock(log_mutex);
         const auto path = std::filesystem::temp_directory_path() /
-            "capturedock-rpc.log";
+            "switch-album-sync-rpc.log";
         std::ofstream output(path, std::ios::app);
         if (output) output << line << '\n';
     } catch (...) {

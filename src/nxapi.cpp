@@ -13,11 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 
-#ifdef _WIN32
 #include "nso_album_sync/windows_compat.hpp"
-#else
-#include <sys/stat.h>
-#endif
 
 namespace nso {
 namespace {
@@ -27,7 +23,7 @@ constexpr char kZncaBaseUrl[] =
 constexpr char kNxapiAuthUrl[] =
     "https://nxapi-auth.fancy.org.uk/api/oauth/token";
 constexpr char kUserAgent[] =
-    "capturedock/2.0.0 (+https://github.com/minimalhandle/NSO-Album-Sync)";
+    "switch-album-sync/2.0.0 (+https://github.com/minimalhandle/NSO-Album-Sync)";
 constexpr char kZncaClientVersion[] = "d8fAZDPzwimzQ7c6";
 constexpr char kCoralLoginUrl[] =
     "https://api-lp1.znc.srv.nintendo.net/v4/Account/Login";
@@ -57,18 +53,12 @@ std::chrono::system_clock::time_point time_from_epoch(std::int64_t value) {
 void replace_cache_file(
     const std::filesystem::path& temporary,
     const std::filesystem::path& target) {
-#ifdef _WIN32
     if (!MoveFileExW(
             temporary.c_str(), target.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);
     }
-#else
-    std::error_code error;
-    std::filesystem::rename(temporary, target, error);
-    if (error) std::filesystem::remove(temporary, error);
-#endif
 }
 
 std::chrono::seconds retry_after_delay(const std::string& value) {
@@ -87,11 +77,7 @@ std::chrono::seconds retry_after_delay(const std::string& value) {
             kDefaultRateLimitBackoff);
     }
 
-#ifdef _WIN32
     const std::time_t retry_at = _mkgmtime(&parsed);
-#else
-    const std::time_t retry_at = timegm(&parsed);
-#endif
     if (retry_at <= 0) {
         return std::chrono::duration_cast<std::chrono::seconds>(
             kDefaultRateLimitBackoff);
@@ -151,13 +137,7 @@ void NxapiClient::save_cache() const {
             file.flush();
             if (!file) return;
         }
-#ifndef _WIN32
-        chmod(temporary.c_str(), 0600);
-#endif
         replace_cache_file(temporary, cache_file_);
-#ifndef _WIN32
-        chmod(cache_file_.c_str(), 0600);
-#endif
     } catch (...) {
         // Cache persistence is an optimisation; never break login because disk
         // cache storage is unavailable.

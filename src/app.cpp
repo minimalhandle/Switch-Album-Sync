@@ -1,7 +1,5 @@
 #include "nso_album_sync/app.hpp"
-#ifdef _WIN32
 #include "import_windows.hpp"
-#endif
 #include "nso_album_sync/local_data.hpp"
 #include "nso_album_sync/path.hpp"
 #include "nso_album_sync/rpc.hpp"
@@ -31,7 +29,7 @@ constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
 constexpr char kManualSignInInstructions[] =
     "Right-click ‘Select this account’ on Nintendo’s page, copy its link address, then paste it below.";
 constexpr char kNxapiDisclosure[] =
-    "CaptureDock uses the third-party nxapi-znca-api service at "
+    "Switch Album Sync uses the third-party nxapi-znca-api service at "
     "fancy.org.uk for Nintendo Switch Online request attestation and "
     "request/response encryption.\n\n"
     "When Nintendo Switch Online features are used, your Nintendo Account "
@@ -63,11 +61,7 @@ std::chrono::milliseconds jittered_interval(std::chrono::milliseconds nominal) {
 std::string local_time_text(std::chrono::sys_seconds time) {
     const auto now = static_cast<std::time_t>(time.time_since_epoch().count());
     std::tm local_time{};
-#ifdef _WIN32
     if (localtime_s(&local_time, &now) != 0) return "Unavailable";
-#else
-    if (localtime_r(&now, &local_time) == nullptr) return "Unavailable";
-#endif
     char buffer[48];
     std::strftime(buffer, sizeof(buffer), "%H:%M (%Y-%m-%d)", &local_time);
     return buffer;
@@ -194,11 +188,15 @@ void App::update_menu() {
     menu.sign_in_pending = auth_pending_;
     menu.manual_sign_in = menu.sign_in_pending && manual_sign_in_;
     menu.destination = album_directory(path_from_utf8(config.destination_folder));
+    menu.watching_folder = !config.watch_folder.empty();
     std::error_code path_error;
     const auto absolute_destination = std::filesystem::absolute(menu.destination, path_error);
     if (!path_error) menu.destination = absolute_destination.lexically_normal().make_preferred();
     menu.credential_status = credential_status(config.session_storage);
     menu.legacy_credential = config.session_storage == SessionStorage::legacy;
+    menu.credential_warning = menu.legacy_credential ||
+        config.session_storage == SessionStorage::session_only ||
+        config.session_storage == SessionStorage::unavailable;
     menu.next_sync = !config.auto_sync ? "Off" :
         (!menu.signed_in ? "Sign in to schedule" : "Scheduling…");
     {
@@ -217,7 +215,7 @@ void App::update_menu() {
             menu.next_sync = local_time_text(next_sync_);
         }
         // Only application-generated codes, flags, and counts belong here.
-        menu.diagnostics = "CaptureDock"
+        menu.diagnostics = "Switch Album Sync"
 #ifdef NSO_APP_VERSION
             " " NSO_APP_VERSION
 #endif
@@ -238,9 +236,26 @@ void App::update_menu() {
     {
         std::lock_guard lock(sync_queue_mutex_);
         menu.sync_busy = sync_request_ != SyncRequest::none || sync_running_;
+        const auto retry = next_retry_locked();
+        if (retry != std::chrono::steady_clock::time_point::max()) {
+            menu.next_retry = local_time_text(std::chrono::floor<std::chrono::seconds>(
+                std::chrono::system_clock::now() + (retry - std::chrono::steady_clock::now())));
+        }
     }
     menu.sync_interval_minutes = std::max(1, config.sync_interval_minutes);
     ui_.update(menu);
+}
+
+std::chrono::steady_clock::time_point App::next_retry_locked() const {
+    auto next = std::chrono::steady_clock::time_point::max();
+    for (const auto& [id, retry] : pending_retries_) next = std::min(next, retry.due);
+    return next;
+}
+
+void App::clear_pending_retries() {
+    std::lock_guard queue_lock(sync_queue_mutex_);
+    pending_retries_.clear();
+    sync_queue_cv_.notify_one();
 }
 
 bool App::invalidate_session(std::uint64_t generation, bool expired) {
@@ -264,6 +279,7 @@ bool App::invalidate_session(std::uint64_t generation, bool expired) {
         discord_.clear();
         std::lock_guard queue_lock(sync_queue_mutex_);
         if (sync_request_ != SyncRequest::local_import) sync_request_ = SyncRequest::none;
+        pending_retries_.clear();
         std::lock_guard state_lock(state_mutex_);
         failed_ids_.clear();
         sync_progress_ = {};
@@ -295,6 +311,17 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         run_scope = history_scope(config);
         generation = account_generation_.load();
         destination = destination_generation_.load();
+        if (request == SyncRequest::automatic_retry) {
+            std::lock_guard queue_lock(sync_queue_mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            for (auto& [id, retry] : pending_retries_) {
+                if (retry.due > now) continue;
+                retry_ids.push_back(id);
+                retry.due = std::chrono::steady_clock::time_point::max();
+                ++retry.attempts;
+            }
+            if (retry_ids.empty()) return;
+        }
         std::lock_guard state_lock(state_mutex_);
         if (request == SyncRequest::retry) {
             if (!capture.empty() && scope != run_scope) {
@@ -345,12 +372,12 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         auto history = sync_history_ ? *sync_history_ : Json::array{};
         history.insert(history.begin(), Json::object{
             {"time", local_time_text(std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now()))},
-            {"scope", run_scope}, {"downloaded", result.new_downloads}, {"skipped", result.skipped},
+            {"scope", run_scope}, {"automatic_retry", request == SyncRequest::automatic_retry}, {"downloaded", result.new_downloads}, {"skipped", result.skipped},
             {"failed", result.failed}, {"unavailable", result.unavailable}, {"error", failure_message(result.failure)},
             {"items", std::move(items)}});
         if (history.size() > 100) history.resize(100);
         if (!write_local_data(config_.directory() / "sync-history.json", Json(history))) {
-            ui_.notify("CaptureDock", "Could not save sync history to disk.");
+            ui_.notify("Switch Album Sync", "Could not save sync history to disk.");
         }
         std::lock_guard state_lock(state_mutex_);
         sync_history_ = std::make_shared<const Json::array>(std::move(history));
@@ -366,11 +393,41 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         std::lock_guard context_lock(sync_context_mutex_);
         if (cancelled()) return;
         notifications = config_.snapshot().notifications;
+        {
+            using namespace std::chrono;
+            std::lock_guard queue_lock(sync_queue_mutex_);
+            if (!result.fatal || request == SyncRequest::automatic_retry) {
+                std::map<std::string, PendingRetry> next;
+                const auto schedule = [&](const std::string& id) {
+                    const auto existing = pending_retries_.find(id);
+                    if (existing != pending_retries_.end() && request != SyncRequest::automatic_retry &&
+                        existing->second.due != steady_clock::time_point::max()) {
+                        next.emplace(id, existing->second);
+                        return;
+                    }
+                    const int attempts = existing == pending_retries_.end() ? 0 : existing->second.attempts;
+                    const auto due = attempts < 3 ? steady_clock::now() + minutes(1 << attempts) :
+                        steady_clock::time_point::max();
+                    next.emplace(id, PendingRetry{due, attempts});
+                };
+                for (const auto& item : result.items) {
+                    if (item.transient && !item.retry_id.empty()) schedule(item.retry_id);
+                }
+                if (request == SyncRequest::automatic_retry && result.failure == SyncFailure::service) {
+                    for (const auto& id : retry_ids) schedule(id);
+                }
+                if (retry_ids.empty()) pending_retries_.swap(next);
+                else {
+                    for (const auto& id : retry_ids) pending_retries_.erase(id);
+                    pending_retries_.merge(next);
+                }
+            }
+        }
         const bool complete = !result.fatal && result.failed == 0 && result.unavailable == 0;
         const auto sync_time = complete ? local_time_text(
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now())) : std::string{};
         bool saved = true;
-        if (complete && capture.empty()) {
+        if (complete && request != SyncRequest::automatic_retry && capture.empty()) {
             try {
                 config_.update([&](AppConfig& value) { value.last_sync = sync_time; });
             } catch (const std::exception&) {
@@ -380,10 +437,10 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
 
         std::lock_guard state_lock(state_mutex_);
         if (!result.fatal) {
-            if (capture.empty()) {
+            if (retry_ids.empty()) {
                 failed_ids_ = std::move(result.failed_ids);
             } else {
-                std::erase(failed_ids_, capture);
+                for (const auto& id : retry_ids) std::erase(failed_ids_, id);
                 failed_ids_.insert(failed_ids_.end(), result.failed_ids.begin(), result.failed_ids.end());
             }
         }
@@ -400,8 +457,9 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
             sync_detail_ += ", " + std::to_string(result.review) + " ready in Duplicate review";
         }
         if (complete) {
-            if (capture.empty()) last_sync_ = sync_time;
-            status_ = !capture.empty() ? "Capture is available in the album" :
+            if (request != SyncRequest::automatic_retry && capture.empty()) last_sync_ = sync_time;
+            status_ = request == SyncRequest::automatic_retry ? "Automatic retry complete" :
+                !capture.empty() ? "Capture is available in the album" :
                 saved ? "Album is up to date" : "Album synced. Could not save the sync timestamp.";
             diagnostic_code_ = saved ? "sync_complete" : "settings_write_failed";
             if (result.new_downloads > 0 || result.review > 0 || request != SyncRequest::automatic) {
@@ -422,18 +480,17 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
     }
 
     if (notifications && !notification.empty() && !cancelled()) {
-#ifdef _WIN32
         if (!result.downloaded_paths.empty()) {
-            ui_.notify_captures("CaptureDock", notification + " Click to view new captures.",
+            ui_.notify_captures("Switch Album Sync", notification + " Click to view new captures.",
                 std::move(result.downloaded_paths));
         } else
-#endif
-        ui_.notify("CaptureDock", notification);
+        ui_.notify("Switch Album Sync", notification);
     }
     queue_recent_refresh();
 }
 
-bool App::queue_sync(SyncRequest request, const std::string& capture, const std::string& scope) {
+bool App::queue_sync(SyncRequest request, const std::string& capture, const std::string& scope,
+                     std::shared_ptr<const ImportPlan> import) {
     {
         std::lock_guard context_lock(sync_context_mutex_);
         std::lock_guard queue_lock(sync_queue_mutex_);
@@ -447,6 +504,7 @@ bool App::queue_sync(SyncRequest request, const std::string& capture, const std:
             scope != history_scope(config_.snapshot())) return false;
         requested_capture_ = capture;
         requested_scope_ = scope;
+        requested_import_ = std::move(import);
         sync_request_ = request;
         status_ = request == SyncRequest::local_import ? "Import queued…" : "Sync queued…";
         sync_progress_ = {};
@@ -459,7 +517,6 @@ bool App::queue_sync(SyncRequest request, const std::string& capture, const std:
 }
 
 void App::queue_recent_refresh() {
-#ifdef _WIN32
     {
         std::lock_guard queue_lock(sync_queue_mutex_);
         if (stopping_) return;
@@ -469,7 +526,6 @@ void App::queue_recent_refresh() {
     }
     update_menu();
     sync_queue_cv_.notify_one();
-#endif
 }
 
 void App::refresh_recent_captures() {
@@ -510,35 +566,81 @@ void App::request_presence_refresh() {
 }
 
 void App::sync_loop() {
+    using Clock = std::chrono::steady_clock;
+    auto next_watch = Clock::now();
+    WatchedFolder watcher;
     for (;;) {
         SyncRequest request;
         std::string capture;
         std::string scope;
+        std::shared_ptr<const ImportPlan> import;
+        bool watch_due = false;
         {
             std::unique_lock lock(sync_queue_mutex_);
-            sync_queue_cv_.wait(lock, [this] {
-                return stopping_.load() || sync_request_ != SyncRequest::none ||
-                    recent_refresh_requested_;
-            });
+            while (!stopping_ && sync_request_ == SyncRequest::none && !recent_refresh_requested_) {
+                const auto retry = next_retry_locked();
+                const auto now = Clock::now();
+                if (retry <= now) break;
+                const bool watching = !config_.snapshot().watch_folder.empty();
+                watch_due = watching && next_watch <= now;
+                if (watch_due) break;
+                const auto next = watching ? std::min(retry, next_watch) : retry;
+                if (next == Clock::time_point::max()) sync_queue_cv_.wait(lock);
+                else sync_queue_cv_.wait_until(lock, next);
+            }
             if (stopping_) break;
             request = sync_request_;
+            if (request == SyncRequest::none && next_retry_locked() <= std::chrono::steady_clock::now()) {
+                request = SyncRequest::automatic_retry;
+            }
             if (request == SyncRequest::none) {
                 recent_refresh_requested_ = false;
             } else {
                 sync_running_ = true;
                 capture.swap(requested_capture_);
                 scope.swap(requested_scope_);
+                import.swap(requested_import_);
                 sync_request_ = SyncRequest::none;
             }
+        }
+        if (watch_due && request == SyncRequest::none) {
+            next_watch = Clock::now() + std::chrono::seconds(5);
+            const auto config = config_.snapshot();
+            if (config.watch_folder.empty()) continue;
+            try {
+                auto plan = watcher.poll(path_from_utf8(config.watch_folder),
+                    album_directory(path_from_utf8(config.destination_folder)),
+                    config_.directory() / "watch-receipts.json", [this] { return stopping_.load(); });
+                if (plan.captures.empty()) continue;
+                {
+                    std::lock_guard lock(sync_queue_mutex_);
+                    const auto current = config_.snapshot();
+                    if (stopping_ || sync_request_ != SyncRequest::none ||
+                        current.watch_folder != config.watch_folder ||
+                        current.destination_folder != config.destination_folder) continue;
+                    sync_running_ = true;
+                }
+                const auto completed = import_captures(plan);
+                watcher.complete(completed);
+                if (completed.size() != plan.captures.size()) {
+                    next_watch = Clock::now() + std::chrono::seconds(30);
+                }
+            } catch (const std::exception&) {
+                next_watch = Clock::now() + std::chrono::seconds(30);
+            }
+            {
+                std::lock_guard lock(sync_queue_mutex_);
+                sync_running_ = false;
+            }
+            update_menu();
+            continue;
         }
         if (request == SyncRequest::none) {
             refresh_recent_captures();
             continue;
         }
-#ifdef _WIN32
-        if (request == SyncRequest::local_import) import_captures(capture);
+        if (request == SyncRequest::local_import && import) import_captures(*import);
         else
-#endif
             sync_now(request, capture, scope);
         {
             std::lock_guard lock(sync_queue_mutex_);
@@ -548,46 +650,49 @@ void App::sync_loop() {
     }
 }
 
-#ifdef _WIN32
-void App::import_captures(const std::string& source) {
+std::vector<std::filesystem::path> App::import_captures(const ImportPlan& plan) {
     const auto generation = destination_generation_.load();
+    const bool watched = !plan.watch_source.empty();
     {
         std::lock_guard lock(state_mutex_);
-        status_ = "Importing captures from USB or microSD…";
+        status_ = watched ? "Importing captures from the watched folder…" : "Importing captures from USB or microSD…";
         diagnostic_code_ = "importing_captures";
     }
     update_menu();
-    const auto cancelled = [this, generation] {
-        return stopping_.load() || generation != destination_generation_.load();
+    const auto cancelled = [this, generation, &plan, watched] {
+        return stopping_.load() || generation != destination_generation_.load() ||
+            (watched && path_from_utf8(config_.snapshot().watch_folder) != plan.watch_source);
     };
     std::string status;
     std::string detail;
     std::vector<std::filesystem::path> copied_paths;
+    std::vector<std::filesystem::path> completed_sources;
     try {
         const auto destination = album_directory(path_from_utf8(config_.snapshot().destination_folder));
-        auto result = import_windows_captures(source, destination, cancelled);
+        auto result = import_windows_captures(plan, destination, cancelled);
         status = result.failed ? "Import finished with errors" :
             result.copied || result.skipped || result.review ? "Import complete" : "No captures found in the selected folder";
         detail = std::to_string(result.copied) + " imported, " + std::to_string(result.skipped) +
             " skipped, " + std::to_string(result.failed) + " failed";
         if (result.review) detail += ", " + std::to_string(result.review) + " ready in Duplicate review";
         copied_paths = std::move(result.copied_paths);
+        completed_sources = std::move(result.completed_sources);
     } catch (const std::exception&) {
         status = "Could not import captures. Check the source and destination folders.";
     }
     {
         std::lock_guard lock(state_mutex_);
-        if (cancelled()) return;
+        if (cancelled()) return completed_sources;
         status_ = std::move(status);
         sync_detail_ = std::move(detail);
         diagnostic_code_ = "import_finished";
     }
     if (!copied_paths.empty() && config_.snapshot().notifications && !cancelled()) {
-        ui_.notify_captures("CaptureDock", "Import complete. Click to view imported captures.", std::move(copied_paths));
+        ui_.notify_captures("Switch Album Sync", "Import complete. Click to view imported captures.", std::move(copied_paths));
     }
     queue_recent_refresh();
+    return completed_sources;
 }
-#endif
 
 void App::complete_pending_login(const std::string& redirect_url_or_code) {
     std::lock_guard auth_lock(auth_flow_mutex_);
@@ -608,6 +713,7 @@ void App::complete_pending_login(const std::string& redirect_url_or_code) {
             std::lock_guard context_lock(sync_context_mutex_);
             if (stopping_) return;
             account_generation_.fetch_add(1);
+            clear_pending_retries();
             coral_.clear_cached_session();
             splatnet_.clear_cache();
             zeldanotes_.clear_cache();
@@ -657,7 +763,7 @@ void App::complete_pending_login(const std::string& redirect_url_or_code) {
             clear_nintendo_auth_callback();
         }
         const std::string message = wrong_state
-            ? (manual_sign_in_ ? "Copy the link from the Nintendo tab CaptureDock opened, then paste it again."
+            ? (manual_sign_in_ ? "Copy the link from the Nintendo tab Switch Album Sync opened, then paste it again."
                 : "Ignored a sign-in response that did not match this request. Finish signing in in your browser.")
             : cancelled ? "Nintendo Account sign-in was cancelled."
             : "Nintendo Account sign-in failed. Open the sign-in page and try again.";
@@ -680,7 +786,7 @@ void App::sign_in_or_out() {
 
     if (!current.session_token.empty()) {
         if (invalidate_session(generation, false) && current.notifications) {
-            ui_.notify("CaptureDock", "Signed out of your Nintendo Account.");
+            ui_.notify("Switch Album Sync", "Signed out of your Nintendo Account.");
         }
         return;
     }
@@ -711,7 +817,7 @@ void App::sign_in_or_out() {
         {
             std::lock_guard state_lock(state_mutex_);
             status_ = automatic_return ? "Waiting for Nintendo Account sign-in in your browser…" :
-                "Finish signing in on Nintendo’s website, then use Paste sign-in link in CaptureDock.";
+                "Finish signing in on Nintendo’s website, then use Paste sign-in link in Switch Album Sync.";
             diagnostic_code_ = automatic_return ? "waiting_for_browser" : "waiting_for_pasted_link";
         }
         update_menu();
@@ -1103,10 +1209,6 @@ int App::run() {
     PlatformCallbacks callbacks;
 
     callbacks.ready = [this] {
-#ifndef _WIN32
-        const bool had_session = !config_.snapshot().session_token.empty();
-        if (!had_session) sign_in_or_out();
-#endif
         const auto config = config_.snapshot();
         const bool use_presence = presence_enabled(config);
         initial_sync_deferred_.store(
@@ -1134,14 +1236,12 @@ int App::run() {
         if (!id.empty()) queue_sync(SyncRequest::retry, id, scope);
     };
     callbacks.refresh_captures = [this] { queue_recent_refresh(); };
-#ifdef _WIN32
     callbacks.import_captures = [this] {
-        const auto source = ui_.choose_import_source();
-        if (!source.empty() && !queue_sync(SyncRequest::local_import, source)) {
-            ui_.notify("CaptureDock", "Wait for the current sync or import to finish, then try again.");
+        auto plan = ui_.choose_import_plan(album_directory(path_from_utf8(config_.snapshot().destination_folder)));
+        if (plan && !queue_sync(SyncRequest::local_import, {}, {}, std::move(plan))) {
+            ui_.notify("Switch Album Sync", "Wait for the current sync or import to finish, then try again.");
         }
     };
-#endif
 
     const auto report_settings_failure = [this] {
         {
@@ -1181,7 +1281,7 @@ int App::run() {
             const auto path = sync_.fetch_latest_capture([this, generation] {
                 if (stopping_ || account_generation_.load() != generation) return;
                 if (config_.snapshot().notifications) {
-                    ui_.notify("CaptureDock", "Downloading latest capture...");
+                    ui_.notify("Switch Album Sync", "Downloading latest capture...");
                 }
             });
             if (stopping_ || account_generation_.load() != generation) return;
@@ -1205,7 +1305,7 @@ int App::run() {
             const auto config = config_.snapshot();
             if (config.notifications) {
                 ui_.notify(
-                    "CaptureDock",
+                    "Switch Album Sync",
                     "Latest capture copied to the clipboard.");
             }
         } catch (const NintendoSessionExpired&) {
@@ -1220,7 +1320,7 @@ int App::run() {
                 diagnostic_code_ = "latest_capture_failed";
             }
             if (config_.snapshot().notifications) {
-                ui_.notify("CaptureDock", message);
+                ui_.notify("Switch Album Sync", message);
             }
         }
         update_menu();
@@ -1250,7 +1350,7 @@ int App::run() {
         }
         if (config.notifications) {
             ui_.notify(
-                "CaptureDock",
+                "Switch Album Sync",
                 config.auto_sync
                     ? "Auto-sync enabled. Interval: " + std::to_string(config.sync_interval_minutes) + " min."
                     : "Auto-sync disabled.");
@@ -1268,7 +1368,7 @@ int App::run() {
             return;
         }
         update_menu();
-        if (enabled) ui_.notify("CaptureDock", "Notifications are enabled.");
+        if (enabled) ui_.notify("Switch Album Sync", "Notifications are enabled.");
     };
 
     callbacks.toggle_discord = [this, report_settings_failure] {
@@ -1343,10 +1443,50 @@ int App::run() {
         request_presence_refresh();
     };
 
+    const auto set_watch_folder = [this, report_settings_failure](const std::string& folder) {
+        try {
+            config_.update([&](AppConfig& config) { config.watch_folder = folder; });
+        } catch (const std::exception&) {
+            report_settings_failure();
+            return;
+        }
+        {
+            std::lock_guard lock(state_mutex_);
+            status_ = folder.empty() ? "Stopped watching the folder" : "Watching " + folder;
+            sync_detail_.clear();
+        }
+        {
+            std::lock_guard lock(sync_queue_mutex_);
+            sync_queue_cv_.notify_one();
+        }
+        update_menu();
+    };
+    callbacks.choose_watch_folder = [this, set_watch_folder] {
+        const auto config = config_.snapshot();
+        const auto selected = ui_.choose_folder(config.watch_folder, L"Choose a capture folder to watch");
+        if (selected.empty() || selected == config.watch_folder) return;
+        const auto destination = album_directory(path_from_utf8(config.destination_folder));
+        if (!valid_watch_folder(path_from_utf8(selected), destination)) {
+            ui_.notify("Switch Album Sync", "Choose a watched folder separate from the album and its parent folders.");
+            return;
+        }
+        if (ui_.confirm("Watch a capture folder",
+                "Import existing and new captures from this folder while Switch Album Sync is running? "
+                "Original files stay in the watched folder.")) {
+            set_watch_folder(selected);
+        }
+    };
+    callbacks.stop_watching_folder = [set_watch_folder] { set_watch_folder({}); };
+
     callbacks.select_folder = [this, report_settings_failure] {
         const auto current = config_.snapshot();
         const auto selected = ui_.choose_folder(current.destination_folder);
         if (selected.empty() || selected == current.destination_folder) return;
+        if (!current.watch_folder.empty() &&
+            !valid_watch_folder(path_from_utf8(current.watch_folder), album_directory(path_from_utf8(selected)))) {
+            ui_.notify("Switch Album Sync", "Stop watching the current folder before choosing this album destination.");
+            return;
+        }
         try {
             std::lock_guard context_lock(sync_context_mutex_);
             config_.update([&](AppConfig& value) {
@@ -1354,6 +1494,7 @@ int App::run() {
                 value.destination_folder = selected;
                 value.last_sync = "Never";
             });
+            clear_pending_retries();
             std::lock_guard state_lock(state_mutex_);
             last_sync_ = "Never";
             failed_ids_.clear();

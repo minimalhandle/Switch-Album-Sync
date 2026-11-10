@@ -20,13 +20,13 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "CaptureDock contributors\0"
-            VALUE "FileDescription", "@PROJECT_NAME@\0"
+            VALUE "CompanyName", "Switch Album Sync contributors\0"
+            VALUE "FileDescription", "Switch Album Sync\0"
             VALUE "FileVersion", "@PROJECT_VERSION@\0"
-            VALUE "InternalName", "@PROJECT_NAME@\0"
+            VALUE "InternalName", "Switch Album Sync\0"
             VALUE "LegalCopyright", "Copyright (c) Dycool contributors\0"
-            VALUE "OriginalFilename", "@PROJECT_NAME@.exe\0"
-            VALUE "ProductName", "@PROJECT_NAME@\0"
+            VALUE "OriginalFilename", "Switch Album Sync.exe\0"
+            VALUE "ProductName", "Switch Album Sync\0"
             VALUE "ProductVersion", "@PROJECT_VERSION@\0"
         END
     END

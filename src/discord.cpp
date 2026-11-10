@@ -21,9 +21,7 @@
 #include <string>
 #include <thread>
 
-#ifdef _WIN32
 #include "nso_album_sync/windows_compat.hpp"
-#endif
 
 #ifndef NSO_DISCORD_SOCIAL_SDK_VERSION
 #define NSO_DISCORD_SOCIAL_SDK_VERSION "1.10.18687"
@@ -40,7 +38,6 @@ constexpr std::size_t kDiscordActivityImageMaxLength = 300;
 constexpr char kNookLinkOrigin[] = "https://web.sd.lp1.acbaa.srv.nintendo.net";
 constexpr char kSplatNet2Origin[] = "https://app.splatoon2.nintendo.net";
 
-#ifdef _WIN32
 bool ensure_embedded_discord_sdk_loaded() {
     static const bool loaded = [] {
         const HMODULE executable = GetModuleHandleW(nullptr);
@@ -61,7 +58,7 @@ bool ensure_embedded_discord_sdk_loaded() {
         std::error_code error;
         auto directory = std::filesystem::temp_directory_path(error);
         if (error) return false;
-        directory /= "CaptureDock";
+        directory /= "Switch Album Sync";
         directory /= "discord-social-sdk-" NSO_DISCORD_SOCIAL_SDK_VERSION;
         std::filesystem::create_directories(directory, error);
         if (error) return false;
@@ -100,7 +97,6 @@ bool ensure_embedded_discord_sdk_loaded() {
     }();
     return loaded;
 }
-#endif
 
 bool is_valid_discord_image_url(const std::string& url) {
     if (url.empty() || url.size() > kDiscordActivityImageMaxLength) return false;
@@ -256,9 +252,7 @@ struct DiscordPresence::Impl {
 
     bool ensure_client_locked() {
         if (client) return true;
-#ifdef _WIN32
         if (!ensure_embedded_discord_sdk_loaded()) return false;
-#endif
         try {
             client = std::make_shared<discordpp::Client>();
             client->SetApplicationId(application_id);

@@ -2,7 +2,6 @@
 #include "nso_album_sync/auth_callback.hpp"
 #include "nso_album_sync/util.hpp"
 
-#ifdef _WIN32
 #include "nso_album_sync/windows_compat.hpp"
 #include "theme_windows.hpp"
 #include <shellapi.h>
@@ -10,12 +9,6 @@
 // Let MSVC/CMake generate the executable manifest and merge this dependency
 // instead of embedding a second RT_MANIFEST resource through app.rc.
 #pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
-#endif
-#else
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #endif
 
 #include <chrono>
@@ -33,64 +26,20 @@ namespace {
 class SingleInstanceGuard {
 public:
     SingleInstanceGuard() {
-#ifdef _WIN32
         handle_ = CreateMutexW(nullptr, FALSE,
-            L"Local\\CaptureDock_SingleInstance_Mutex");
+            L"Local\\SwitchAlbumSync_SingleInstance_Mutex");
         acquired_ = handle_ != nullptr && GetLastError() != ERROR_ALREADY_EXISTS;
-#else
-        const auto directory = nso::application_runtime_directory();
-        if (directory.empty()) {
-            throw std::runtime_error(
-                "Could not create a private application runtime directory");
-        }
-
-        const auto path = directory / "instance.lock";
-        fd_ = open(
-            path.c_str(),
-            O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC,
-            0600);
-        if (fd_ < 0) {
-            throw std::runtime_error("Could not open the application instance lock");
-        }
-
-        struct stat information{};
-        if (fstat(fd_, &information) != 0 ||
-            !S_ISREG(information.st_mode) ||
-            information.st_uid != getuid()) {
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("Application instance lock is not a private user file");
-        }
-        if ((information.st_mode & 0077) != 0 && fchmod(fd_, 0600) != 0) {
-            close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("Could not secure the application instance lock");
-        }
-
-        acquired_ = flock(fd_, LOCK_EX | LOCK_NB) == 0;
-#endif
     }
 
     ~SingleInstanceGuard() {
-#ifdef _WIN32
         if (handle_ != nullptr) CloseHandle(handle_);
-#else
-        if (fd_ >= 0) {
-            if (acquired_) flock(fd_, LOCK_UN);
-            close(fd_);
-        }
-#endif
     }
 
     bool acquired() const { return acquired_; }
 
 private:
     bool acquired_ = false;
-#ifdef _WIN32
     HANDLE handle_ = nullptr;
-#else
-    int fd_ = -1;
-#endif
 };
 
 int run_self_test() {
@@ -109,7 +58,7 @@ int run_self_test() {
             discord.clear();
         }
 
-        std::cout << "CaptureDock self-test passed\n";
+        std::cout << "Switch Album Sync self-test passed\n";
         return 0;
     } catch (const std::exception&) {
         std::cerr << "Self-test failed during initialization\n";
@@ -120,8 +69,8 @@ int run_self_test() {
 void log_debug_startup(const char* message) {
     if (!nso::debug_logging_enabled()) return;
     try {
-        std::ofstream log(std::filesystem::temp_directory_path() / "capturedock-rpc.log", std::ios::app);
-        if (log) log << "[CaptureDock] " << message << '\n';
+        std::ofstream log(std::filesystem::temp_directory_path() / "switch-album-sync-rpc.log", std::ios::app);
+        if (log) log << "[Switch Album Sync] " << message << '\n';
     } catch (const std::exception&) {
     }
 }
@@ -131,30 +80,24 @@ int run_application(const std::string& auth_callback, [[maybe_unused]] bool star
     try {
         SingleInstanceGuard single_instance;
         if (!single_instance.acquired()) {
-            log_debug_startup("Another CaptureDock instance is running. Exit it from the tray before relaunching in debug mode.");
+            log_debug_startup("Another Switch Album Sync instance is running. Exit it from the tray before relaunching in debug mode.");
             if (!auth_callback.empty()) {
                 // Protocol callbacks launch a second copy of the executable.
                 // Forward that URL to the already-running tray process instead
                 // of treating the launch as an ordinary second app instance.
                 for (int attempt = 0; attempt < 5; ++attempt) {
                     if (nso::publish_nintendo_auth_callback(auth_callback)) {
-#ifdef _WIN32
                         nso::show_running_dashboard();
-#endif
                         return 0;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
             }
-#ifdef _WIN32
             if (auth_callback.empty() && start_in_tray) return 0;
             if (auth_callback.empty() && nso::show_running_dashboard()) return 0;
             nso::theme::message_box(nullptr,
                 L"Open it from its icon in the notification area.",
-                L"CaptureDock is already running", MB_OK);
-#else
-            std::cerr << "CaptureDock is already running.\n";
-#endif
+                L"Switch Album Sync is already running", MB_OK);
             return 0;
         }
 
@@ -162,17 +105,16 @@ int run_application(const std::string& auth_callback, [[maybe_unused]] bool star
             nso::publish_nintendo_auth_callback(auth_callback);
         }
 
-        log_debug_startup("Starting CaptureDock in debug mode.");
+        log_debug_startup("Starting Switch Album Sync in debug mode.");
         nso::App app;
         return app.run();
     } catch (const std::exception&) {
-        log_debug_startup("CaptureDock could not start.");
-        std::cerr << "Fatal: CaptureDock could not start\n";
+        log_debug_startup("Switch Album Sync could not start.");
+        std::cerr << "Fatal: Switch Album Sync could not start\n";
         return 1;
     }
 }
 
-#ifdef _WIN32
 std::string wide_to_utf8(const std::wstring& value) {
     if (value.empty()) return {};
     const int required = WideCharToMultiByte(CP_UTF8, 0, value.data(),
@@ -254,38 +196,12 @@ std::string auth_callback_from_command_line() {
     // exactly the form we registered. Scan the raw command line as a fallback.
     return extract_auth_callback(wide_to_utf8(GetCommandLineW()));
 }
-#endif
 
 }  // namespace
 
-#ifdef _WIN32
 int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     nso::set_debug_logging_enabled(
         command_line_has_argument(L"--debug") || command_line_has_argument(L"-debug"));
     if (command_line_has_argument(L"--self-test")) return run_self_test();
     return run_application(auth_callback_from_command_line(), command_line_has_argument(L"--start-in-tray"));
 }
-#else
-int main(int argc, char* argv[]) {
-    bool debug = false;
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] != nullptr &&
-            (std::string(argv[i]) == "--debug" || std::string(argv[i]) == "-debug")) {
-            debug = true;
-        }
-        if (argv[i] != nullptr && std::string(argv[i]) == "--self-test") {
-            return run_self_test();
-        }
-    }
-    nso::set_debug_logging_enabled(debug);
-
-    std::string callback;
-    for (int i = 1; i < argc; ++i) {
-        if (argv[i] != nullptr && nso::is_nintendo_auth_callback(argv[i])) {
-            callback = argv[i];
-            break;
-        }
-    }
-    return run_application(callback);
-}
-#endif

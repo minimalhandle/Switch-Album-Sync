@@ -27,7 +27,7 @@ void log_zelda(const std::string& msg) {
     if (!debug_logging_enabled()) return;
     std::cerr << "[ZeldaNotes] " << msg << "\n";
     try {
-        const auto path = std::filesystem::temp_directory_path() / "capturedock-rpc.log";
+        const auto path = std::filesystem::temp_directory_path() / "switch-album-sync-rpc.log";
         std::ofstream output(path, std::ios::app);
         if (output) output << "[ZeldaNotes] " << msg << '\n';
     } catch (...) {}

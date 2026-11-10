@@ -1,6 +1,5 @@
 #include "nso_album_sync/platform.hpp"
 
-#ifdef _WIN32
 #include "dashboard_windows.hpp"
 #include "import_windows.hpp"
 #include "library_windows.hpp"
@@ -27,10 +26,10 @@ constexpr int kIconId = 101;
 constexpr UINT kRecentCommand = 2000;
 constexpr std::size_t kRecentLimit = 8;
 constexpr int kDisclosureSourceButton = 1101;
-constexpr wchar_t kAppTitle[] = L"CaptureDock";
-constexpr wchar_t kTrayClass[] = L"CaptureDockTray";
+constexpr wchar_t kAppTitle[] = L"Switch Album Sync";
+constexpr wchar_t kTrayClass[] = L"SwitchAlbumSyncTray";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kRunValue[] = L"CaptureDock";
+constexpr wchar_t kRunValue[] = L"Switch Album Sync";
 constexpr wchar_t kStartInTray[] = L"--start-in-tray";
 constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
 constexpr char kNxapiSourceUrl[] =
@@ -440,7 +439,7 @@ PlatformUi::~PlatformUi() { delete impl_; }
 void PlatformUi::run(const PlatformCallbacks& callbacks) {
     impl_->callbacks = callbacks;
     g_ui = impl_;
-    SetCurrentProcessExplicitAppUserModelID(L"minimalhandle.CaptureDock");
+    SetCurrentProcessExplicitAppUserModelID(L"minimalhandle.SwitchAlbumSync");
     theme::init_process();
 
     const HINSTANCE instance = GetModuleHandleW(nullptr);
@@ -477,7 +476,7 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
     if (!impl_->window) {
         MessageBoxW(
             nullptr,
-            L"Could not start the CaptureDock window.",
+            L"Could not start the Switch Album Sync window.",
             kAppTitle,
             MB_OK | MB_ICONERROR);
         g_ui = nullptr;
@@ -571,11 +570,12 @@ bool PlatformUi::confirm(
                               MB_YESNO | MB_DEFBUTTON2) == IDYES;
 }
 
-std::string PlatformUi::choose_import_source() {
-    return pick_import_source(impl_->dashboard.visible_window());
+std::shared_ptr<const ImportPlan> PlatformUi::choose_import_plan(const std::filesystem::path& album) {
+    const auto owner = impl_->dashboard.visible_window();
+    return pick_import_plan(owner ? owner : impl_->window.load(), album);
 }
 
-std::string PlatformUi::choose_folder(const std::string& initial) {
+std::string PlatformUi::choose_folder(const std::string& initial, const wchar_t* title) {
     const HRESULT init = CoInitializeEx(
         nullptr,
         COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -595,7 +595,7 @@ std::string PlatformUi::choose_folder(const std::string& initial) {
             FOS_PICKFOLDERS |
             FOS_FORCEFILESYSTEM |
             FOS_PATHMUSTEXIST);
-        dialog->SetTitle(L"Choose Album Folder");
+        dialog->SetTitle(title);
 
         if (!initial.empty()) {
             IShellItem* folder = nullptr;
@@ -681,4 +681,3 @@ void set_start_on_boot(bool enabled) {
     RegCloseKey(key);
 }
 }  // namespace nso
-#endif
