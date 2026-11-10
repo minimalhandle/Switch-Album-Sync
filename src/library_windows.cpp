@@ -781,8 +781,8 @@ struct WindowsLibrary::Impl {
         if (!match || state.sync_busy || (!keep_both && !IsWindowEnabled(get(KeepExisting)))) return;
         const auto selected = *match;
         const auto album = state.destination;
-        if (!keep_both && MessageBoxW(window, L"Discard CaptureDock’s staged incoming copy and keep the album copy?",
-            L"Duplicate review", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2) != IDYES) return;
+        if (!keep_both && theme::message_box(window, L"Discard CaptureDock’s staged incoming copy and keep the album copy?",
+            L"Duplicate review", MB_YESNO | MB_DEFBUTTON2) != IDYES) return;
         image.reset();
         incoming_image.reset();
         if (album != state.destination || state.sync_busy || !resolve_import_match(album, selected, keep_both)) {

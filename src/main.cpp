@@ -4,6 +4,7 @@
 
 #ifdef _WIN32
 #include "nso_album_sync/windows_compat.hpp"
+#include "theme_windows.hpp"
 #include <shellapi.h>
 #ifdef _MSC_VER
 // Let MSVC/CMake generate the executable manifest and merge this dependency
@@ -148,9 +149,9 @@ int run_application(const std::string& auth_callback, [[maybe_unused]] bool star
 #ifdef _WIN32
             if (auth_callback.empty() && start_in_tray) return 0;
             if (auth_callback.empty() && nso::show_running_dashboard()) return 0;
-            MessageBoxW(nullptr,
-                L"CaptureDock is already running in the notification area.",
-                L"CaptureDock", MB_OK | MB_ICONINFORMATION);
+            nso::theme::message_box(nullptr,
+                L"Open it from its icon in the notification area.",
+                L"CaptureDock is already running", MB_OK);
 #else
             std::cerr << "CaptureDock is already running.\n";
 #endif

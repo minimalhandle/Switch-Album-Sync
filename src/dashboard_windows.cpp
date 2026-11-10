@@ -26,8 +26,9 @@ constexpr UINT kThumbnailsReady = WM_APP + 61;
 constexpr UINT_PTR kFeedbackTimer = 1;
 constexpr int kWidth = 704;
 constexpr int kMinimumWidth = 610;
-constexpr int kHeight = 684;
-constexpr int kDiscordSettingsHeight = 212;
+constexpr int kBannerHeight = 84;
+constexpr int kCardPadding = 12;
+constexpr int kCardGap = 8;
 constexpr int kMargin = 24;
 constexpr int kThumbnailWidth = 96;
 constexpr int kThumbnailHeight = 64;
@@ -270,7 +271,7 @@ struct WindowsDashboard::Impl {
     UINT dpi = 96;
     int scroll = 0;
     bool discord_expanded() const { return state.discord_available && state.discord; }
-    int content_height() const { return px(kHeight + (discord_expanded() ? kDiscordSettingsHeight : 0)); }
+    int content_height() const { return px(arrange(kMinimumWidth - kMargin).height); }
 
     void fit_height() {
         if (IsZoomed(window) || IsIconic(window)) return;
@@ -411,6 +412,131 @@ struct WindowsDashboard::Impl {
         if (old_title) DeleteObject(old_title);
     }
 
+    struct Placement {
+        Control id;
+        RECT bounds;  // 96 DPI units, before scrolling
+    };
+    struct Arrangement {
+        std::vector<Placement> items;
+        std::vector<std::pair<int, int>> cards;  // top and bottom of each section panel
+        int height = 0;
+    };
+    std::vector<std::pair<int, int>> cards;
+
+    // Builds the dashboard from top to bottom. Each section is a card and each
+    // row advances the cursor, so resizing a row moves everything below it.
+    Arrangement arrange(int right) const {
+        Arrangement result;
+        const int left = kMargin, span = right - left, half = span / 2;
+        const auto put = [&](Control id, int x, int top, int width, int height) {
+            result.items.push_back({id, RECT{x, top, x + width, top + height}});
+        };
+        // Places a control whose right edge sits `inset` units from the margin.
+        const auto put_right = [&](Control id, int inset, int top, int width, int height) {
+            put(id, right - inset, top, width, height);
+        };
+        int y = 18;
+        put(Title, left, y, span, 36);
+        put(Subtitle, left, y + 38, span, 22);
+
+        y = kBannerHeight + 12;
+        const struct { Control id; int width; } nav[] = {
+            {OpenLibrary, 116}, {OpenHistory, 90}, {OpenStorage, 68}, {ImportCaptures, 142}, {OpenDuplicates, 124},
+        };
+        int x = left;
+        for (const auto& button : nav) {
+            put(button.id, x, y, button.width, 31);
+            x += button.width + 8;
+        }
+        y += 31 + kCardGap;
+
+        int card_top = 0;
+        const auto open_card = [&] {
+            card_top = y;
+            y += kCardPadding;
+        };
+        const auto close_card = [&] {
+            y += kCardPadding;
+            result.cards.push_back({card_top, y});
+            y += kCardGap;
+        };
+
+        open_card();
+        put(AccountHeading, left, y, span - 130, 20);
+        put_right(PasteSignIn, 280, y + 10, 153, 29);
+        put_right(AccountAction, 118, y + 10, 118, 29);
+        y += 24;
+        put(AccountStatus, left, y, span - (state.manual_sign_in ? 289 : 130), 31);
+        y += 31;
+        put(CredentialNote, left, y, span - (state.legacy_credential ? 177 : 0), 34);
+        put_right(ClearCredential, 166, y, 166, 28);
+        y += 34;
+        close_card();
+
+        open_card();
+        put(AlbumHeading, left, y, span, 20);
+        y += 26;
+        put(Destination, left, y, span - 221, 28);
+        put_right(ChooseFolder, 212, y, 112, 28);
+        put_right(OpenFolder, 92, y, 92, 28);
+        y += 37;
+        put(LastSync, left, y, half - 8, 21);
+        put(NextSync, left + half, y, half, 21);
+        y += 25;
+        put(SyncStatus, left, y, span, 41);
+        y += 43;
+        put(SyncDetail, left, y, span, 18);
+        y += 18;
+        put(Progress, left, y, span, 8);
+        y += 18;
+        put(SyncNow, left, y, 100, 29);
+        put(RetryFailed, left + 108, y, 102, 29);
+        put_right(AutoSync, 184, y, 184, 29);
+        y += 29;
+        close_card();
+
+        open_card();
+        put(CapturesHeading, left, y + 3, span - 242, 21);
+        put_right(CopyLatest, 230, y - 3, 104, 28);
+        put_right(ShowInFolder, 118, y - 3, 118, 28);
+        y += 32;
+        put(Captures, left, y, span, 103);
+        put(EmptyCaptures, left, y + 6, span, 42);
+        y += 103;
+        close_card();
+
+        open_card();
+        put(DiscordHeading, left, y - 4, span - 270, 22);
+        put_right(CopyDiagnostics, 128, y + 3, 128, 29);
+        put_right(Feedback, 295, y + 7, 156, 24);
+        y += 18;
+        put(DiscordToggle, left, y, span - 270, 25);
+        put(DiscordUnavailable, left, y + 3, span - 270, 20);
+        y += 25;
+        if (discord_expanded()) {
+            y += 5;
+            put(DiscordProfileHeading, left, y, half - 8, 21);
+            put(DiscordGamesHeading, left + half, y, half - 8, 21);
+            y += 23;
+            int column_bottom[2] = {y, y};
+            for (std::size_t index = 0; index < std::size(kDiscordOptions); ++index) {
+                const int column = index < 3 ? 0 : 1;
+                put(kDiscordOptions[index].control, left + column * half, column_bottom[column], half - 8, 22);
+                column_bottom[column] += 22;
+            }
+            put(DiscordRefresh, left, column_bottom[0], 142, 26);
+            column_bottom[0] += 26;
+            y = std::max(column_bottom[0], column_bottom[1]) + 8;
+            put(DiscordZeldaGames, left, y, span, 54);
+            y += 58;
+            put(DiscordHint, left, y, span, 20);
+            y += 20;
+        }
+        close_card();
+        result.height = y - kCardGap + 12;
+        return result;
+    }
+
     void layout(int desired_scroll) {
         RECT client{};
         GetClientRect(window, &client);
@@ -423,62 +549,13 @@ struct WindowsDashboard::Impl {
         GetClientRect(window, &client);
         const int right = std::max(kMinimumWidth - kMargin,
                                   MulDiv(client.right, 96, static_cast<int>(dpi)) - kMargin);
-        const int span = right - kMargin;
-        const auto place = [&](Control id, int x, int y, int width, int height) {
-            if (id != Title && id != Subtitle && id != OpenLibrary && id != OpenHistory &&
-                id != OpenStorage && id != ImportCaptures && id != OpenDuplicates) y += 50;
-            MoveWindow(controls[id], px(x), px(y) - scroll, px(width), px(height), TRUE);
-        };
-        place(Title, kMargin, 18, span, 36);
-        place(Subtitle, kMargin, 56, span, 22);
-        place(OpenLibrary, kMargin, 96, 116, 31);
-        place(OpenHistory, kMargin + 124, 96, 90, 31);
-        place(OpenStorage, kMargin + 222, 96, 68, 31);
-        place(ImportCaptures, kMargin + 298, 96, 142, 31);
-        place(OpenDuplicates, kMargin + 448, 96, 124, 31);
-        place(RuleAccount, kMargin, 85, span, 2);
-        place(AccountHeading, kMargin, 96, span - 130, 20);
-        place(AccountStatus, kMargin, 120, span - (state.manual_sign_in ? 289 : 130), 31);
-        place(PasteSignIn, right - 280, 106, 153, 29);
-        place(AccountAction, right - 118, 106, 118, 29);
-        place(CredentialNote, kMargin, 151, span - (state.legacy_credential ? 177 : 0), 34);
-        place(ClearCredential, right - 166, 151, 166, 28);
-        place(RuleAlbum, kMargin, 186, span, 2);
-        place(AlbumHeading, kMargin, 196, span, 20);
-        place(Destination, kMargin, 222, span - 221, 28);
-        place(ChooseFolder, right - 212, 222, 112, 28);
-        place(OpenFolder, right - 92, 222, 92, 28);
-        place(LastSync, kMargin, 259, span / 2 - 8, 21);
-        place(NextSync, kMargin + span / 2, 259, span / 2, 21);
-        place(SyncStatus, kMargin, 284, span, 41);
-        place(SyncDetail, kMargin, 327, span, 18);
-        place(Progress, kMargin, 345, span, 8);
-        place(SyncNow, kMargin, 363, 100, 29);
-        place(RetryFailed, kMargin + 108, 363, 102, 29);
-        place(AutoSync, right - 184, 363, 184, 29);
-        place(RuleCaptures, kMargin, 407, span, 2);
-        place(CapturesHeading, kMargin, 422, span - 242, 21);
-        place(CopyLatest, right - 230, 416, 104, 28);
-        place(ShowInFolder, right - 118, 416, 118, 28);
-        place(Captures, kMargin, 451, span, 103);
-        place(EmptyCaptures, kMargin, 457, span, 42);
-        place(RuleSettings, kMargin, 561, span, 2);
-        place(DiscordHeading, kMargin, 574, span - 270, 22);
-        place(DiscordToggle, kMargin, 596, span - 270, 25);
-        place(DiscordUnavailable, kMargin, 599, span - 270, 20);
-        place(DiscordProfileHeading, kMargin, 626, span / 2 - 8, 21);
-        place(DiscordGamesHeading, kMargin + span / 2, 626, span / 2 - 8, 21);
-        for (std::size_t index = 0; index < std::size(kDiscordOptions); ++index) {
-            const int column = index < 3 ? 0 : 1;
-            const int row = static_cast<int>(index) - (column ? 3 : 0);
-            place(kDiscordOptions[index].control, kMargin + column * (span / 2),
-                  649 + row * 22, span / 2 - 8, 22);
+        const auto plan = arrange(right);
+        cards = plan.cards;
+        for (const auto& item : plan.items) {
+            const auto& r = item.bounds;
+            MoveWindow(controls[item.id], px(r.left), px(r.top) - scroll,
+                       px(r.right - r.left), px(r.bottom - r.top), TRUE);
         }
-        place(DiscordRefresh, kMargin, 714, 142, 26);
-        place(DiscordZeldaGames, kMargin, 747, span, 54);
-        place(DiscordHint, kMargin, 805, span, 20);
-        place(CopyDiagnostics, right - 128, 581, 128, 29);
-        place(Feedback, right - 295, 585, 156, 24);
         InvalidateRect(window, nullptr, TRUE);
     }
 
@@ -777,11 +854,8 @@ struct WindowsDashboard::Impl {
                         theme::fill_round(dc, RECT{px(12), px(top) - scroll, right, px(bottom) - scroll},
                                           px(14), theme::kCard);
                     };
-                    card(135, 235);
-                    card(242, 451);
-                    card(458, 609);
-                    card(616, 675 + (discord_expanded() ? kDiscordSettingsHeight : 0));
-                    bounds.bottom = px(84) - scroll;
+                    for (const auto& [top, bottom] : cards) card(top, bottom);
+                    bounds.bottom = px(kBannerHeight) - scroll;
                     FillRect(dc, &bounds, theme::brush(theme::kRed));
                     bounds.top = bounds.bottom - px(3);
                     FillRect(dc, &bounds, theme::brush(theme::kRedDeep));
@@ -894,7 +968,7 @@ bool WindowsDashboard::create(HICON icon, const PlatformCallbacks& callbacks,
     HWND window = CreateWindowExW(ex_style, kDashboardClass, kTitle, style,
         work.left, work.top, 0, 0, nullptr, nullptr, instance, impl_.get());
     if (!window) return false;
-    RECT bounds{0, 0, impl_->px(kWidth), impl_->px(kHeight)};
+    RECT bounds{0, 0, impl_->px(kWidth), impl_->content_height()};
     AdjustWindowRectExForDpi(&bounds, WS_OVERLAPPEDWINDOW, FALSE, ex_style, impl_->dpi);
     const int width = std::min(bounds.right - bounds.left, work.right - work.left);
     const int height = std::min(bounds.bottom - bounds.top, work.bottom - work.top);

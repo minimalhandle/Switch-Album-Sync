@@ -2,6 +2,10 @@
 
 #include "nso_album_sync/windows_compat.hpp"
 
+#include <functional>
+#include <string>
+#include <vector>
+
 namespace nso::theme {
 
 // Nintendo brand red (#E60012) on a dark charcoal base. High-contrast mode
@@ -44,5 +48,37 @@ void set_primary(HWND button, bool primary = true);
 LRESULT control_color(UINT msg, WPARAM wp, LPARAM lp, COLORREF surface);
 
 void fill_round(HDC dc, const RECT& bounds, int radius, COLORREF fill, COLORREF border = CLR_INVALID);
+
+struct DialogButton {
+    int id = 0;
+    std::wstring label;
+    bool primary = false;
+    // A button that does not close the dialog reports through on_command.
+    bool closes = true;
+};
+
+// A modal, per-monitor DPI aware dialog in the CaptureDock theme: a heading,
+// body text, an optional single-line field and a row of buttons.
+struct Dialog {
+    std::wstring title;
+    std::wstring heading;
+    std::wstring text;
+    std::vector<DialogButton> buttons;
+    int cancel_id = IDCANCEL;
+    int focus_id = 0;
+    bool field = false;
+    std::wstring field_value;
+    std::wstring field_cue;
+    int width = 460;
+    std::function<void(int)> on_command;
+};
+
+// Returns the id of the button that closed the dialog, or cancel_id. When
+// `field` is set, field_value holds the edited text afterwards.
+int run_dialog(HWND owner, Dialog& dialog);
+
+// Themed replacement for MessageBoxW. Supports MB_OK, MB_OKCANCEL and
+// MB_YESNO, plus MB_DEFBUTTON2 for the initially focused button.
+int message_box(HWND owner, const std::wstring& text, const std::wstring& title, UINT flags);
 
 }  // namespace nso::theme

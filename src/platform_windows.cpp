@@ -29,8 +29,6 @@ constexpr std::size_t kRecentLimit = 8;
 constexpr int kDisclosureSourceButton = 1101;
 constexpr wchar_t kAppTitle[] = L"CaptureDock";
 constexpr wchar_t kTrayClass[] = L"CaptureDockTray";
-constexpr wchar_t kPromptClass[] = L"CaptureDockPrompt";
-constexpr wchar_t kDisclosureClass[] = L"CaptureDockDisclosure";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"CaptureDock";
 constexpr wchar_t kStartInTray[] = L"--start-in-tray";
@@ -115,435 +113,36 @@ void write_startup_command(HKEY key, const std::wstring& quoted_executable) {
         static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
 }
 
-struct PromptState {
-    HWND edit = nullptr;
-    bool done = false;
-    bool accepted = false;
-};
-
-struct DisclosureState {
-    bool done = false;
-    bool accepted = false;
-};
-
-class ScaledDialog {
-public:
-    ScaledDialog() : previous_(SetThreadDpiAwarenessContext(
-        DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED)) {}
-    ~ScaledDialog() {
-        if (previous_) SetThreadDpiAwarenessContext(previous_);
-    }
-
-private:
-    DPI_AWARENESS_CONTEXT previous_;
-};
-
-HFONT dialog_font() {
-    // Dialogs run DPI-unaware with GDI scaling, so a fixed 96 DPI size is right.
-    static const HFONT font = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-        DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-    return font ? font : reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-}
-
-LRESULT dialog_color(UINT msg, WPARAM wp, LPARAM lp) {
-    if (const auto themed = theme::control_color(msg, wp, lp, theme::kBackground)) return themed;
-    if (msg == WM_CTLCOLORSTATIC) {
-        auto dc = reinterpret_cast<HDC>(wp);
-        SetBkMode(dc, TRANSPARENT);
-        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
-    }
-    if (msg == WM_CTLCOLOREDIT) {
-        auto dc = reinterpret_cast<HDC>(wp);
-        SetBkColor(dc, GetSysColor(COLOR_WINDOW));
-        SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
-        return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
-    }
-    return 0;
-}
-
-HWND centered_dialog(
-    DWORD ex_style,
-    const wchar_t* class_name,
-    const std::wstring& title,
-    int client_width,
-    int client_height,
-    HINSTANCE instance,
-    void* state,
-    HWND owner) {
-    constexpr DWORD style = WS_CAPTION | WS_SYSMENU;
-    RECT rect{0, 0, client_width, client_height};
-    AdjustWindowRectEx(&rect, style, FALSE, ex_style);
-    const int width = rect.right - rect.left;
-    const int height = rect.bottom - rect.top;
-    RECT area{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
-    if (owner) GetWindowRect(owner, &area);
-    const int x = area.left + (area.right - area.left - width) / 2;
-    const int y = area.top + (area.bottom - area.top - height) / 2;
-    return CreateWindowExW(
-        ex_style, class_name, title.c_str(), style,
-        x, y, width, height, owner, nullptr, instance, state);
-}
-
-HWND make_control(
-    HINSTANCE instance,
-    HWND parent,
-    const wchar_t* cls,
-    const std::wstring& caption,
-    DWORD style,
-    int x,
-    int y,
-    int width,
-    int height,
-    int id,
-    DWORD ex_style = 0) {
-    HWND control = CreateWindowExW(
-        ex_style,
-        cls,
-        caption.c_str(),
-        WS_CHILD | WS_VISIBLE | style,
-        x,
-        y,
-        width,
-        height,
-        parent,
-        id ? reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)) : nullptr,
-        instance,
-        nullptr);
-    if (control != nullptr) {
-        SendMessageW(
-            control,
-            WM_SETFONT,
-            reinterpret_cast<WPARAM>(dialog_font()),
-            TRUE);
-    }
-    return control;
-}
-
-int measure_text_height(const std::wstring& text, int width) {
-    HDC dc = GetDC(nullptr);
-    if (dc == nullptr) return 180;
-
-    HFONT font = dialog_font();
-    HGDIOBJ previous = SelectObject(dc, font);
-    RECT bounds{0, 0, width, 0};
-    DrawTextW(
-        dc,
-        text.c_str(),
-        static_cast<int>(text.size()),
-        &bounds,
-        DT_LEFT | DT_WORDBREAK | DT_NOPREFIX | DT_EDITCONTROL | DT_CALCRECT);
-    SelectObject(dc, previous);
-    ReleaseDC(nullptr, dc);
-    return std::max(1L, bounds.bottom - bounds.top);
-}
-
-LRESULT CALLBACK prompt_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    auto* state = reinterpret_cast<PromptState*>(
-        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (msg == WM_NCCREATE) {
-        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
-        state = static_cast<PromptState*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-    }
-
-    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLOREDIT || msg == WM_CTLCOLORBTN) {
-        return dialog_color(msg, wp, lp);
-    }
-
-    if (state && msg == WM_COMMAND) {
-        if (LOWORD(wp) == IDOK) {
-            state->accepted = true;
-            state->done = true;
-            return 0;
-        }
-        if (LOWORD(wp) == IDCANCEL) {
-            state->done = true;
-            return 0;
-        }
-    }
-    if (state && msg == WM_CLOSE) {
-        state->done = true;
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
-LRESULT CALLBACK disclosure_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    auto* state = reinterpret_cast<DisclosureState*>(
-        GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (msg == WM_NCCREATE) {
-        auto* cs = reinterpret_cast<CREATESTRUCTW*>(lp);
-        state = static_cast<DisclosureState*>(cs->lpCreateParams);
-        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(state));
-    }
-
-    if (msg == WM_CTLCOLORSTATIC || msg == WM_CTLCOLORBTN) {
-        return dialog_color(msg, wp, lp);
-    }
-
-    if (state && msg == WM_COMMAND) {
-        const auto command = LOWORD(wp);
-        if (command == IDOK) {
-            state->accepted = true;
-            state->done = true;
-            return 0;
-        }
-        if (command == IDCANCEL) {
-            state->done = true;
-            return 0;
-        }
-        if (command == kDisclosureSourceButton) {
-            const auto url = wide(kNxapiSourceUrl);
-            ShellExecuteW(
-                nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            return 0;
-        }
-    }
-    if (state && msg == WM_CLOSE) {
-        state->done = true;
-        return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
 std::string prompt_box(
     const std::string& title,
     const std::string& text,
     const std::string& initial,
     HWND owner) {
-    const ScaledDialog dpi;
-    const HINSTANCE instance = GetModuleHandleW(nullptr);
-
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = prompt_proc;
-    wc.hInstance = instance;
-    wc.hIcon = app_icon();
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kBackground);
-    wc.lpszClassName = kPromptClass;
-    RegisterClassW(&wc);
-
-    PromptState state;
-    HWND window = centered_dialog(
-        WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
-        kPromptClass,
-        wide(title),
-        540,
-        150,
-        instance,
-        &state,
-        owner);
-    if (!window) return initial;
-
-    make_control(
-        instance,
-        window,
-        L"STATIC",
-        wide(text),
-        SS_LEFT | SS_NOPREFIX,
-        18,
-        17,
-        504,
-        36,
-        0);
-
-    state.edit = make_control(
-        instance,
-        window,
-        L"EDIT",
-        wide(initial),
-        WS_TABSTOP | ES_AUTOHSCROLL,
-        18,
-        63,
-        504,
-        27,
-        10,
-        WS_EX_CLIENTEDGE);
-    if (state.edit != nullptr) {
-        SendMessageW(
-            state.edit,
-            EM_SETMARGINS,
-            EC_LEFTMARGIN | EC_RIGHTMARGIN,
-            MAKELPARAM(6, 6));
-    }
-
-    make_control(
-        instance,
-        window,
-        L"BUTTON",
-        L"Save",
-        WS_TABSTOP | BS_DEFPUSHBUTTON,
-        354,
-        105,
-        80,
-        28,
-        IDOK);
-    make_control(
-        instance,
-        window,
-        L"BUTTON",
-        L"Cancel",
-        WS_TABSTOP,
-        442,
-        105,
-        80,
-        28,
-        IDCANCEL);
-
-    if (owner) EnableWindow(owner, FALSE);
-    theme::apply(window);
-    ShowWindow(window, SW_SHOW);
-    SetForegroundWindow(window);
-    if (state.edit != nullptr) {
-        SetFocus(state.edit);
-        SendMessageW(state.edit, EM_SETSEL, 0, -1);
-    }
-
-    MSG msg{};
-    BOOL received = TRUE;
-    while (!state.done && (received = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
-        if (state.edit != nullptr &&
-            msg.message == WM_KEYDOWN &&
-            msg.hwnd == state.edit) {
-            if (msg.wParam == VK_RETURN) {
-                state.accepted = true;
-                state.done = true;
-                continue;
-            }
-            if (msg.wParam == VK_ESCAPE) {
-                state.done = true;
-                continue;
-            }
-        }
-        if (!IsDialogMessageW(window, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    if (!received) PostQuitMessage(static_cast<int>(msg.wParam));
-
-    std::string result = initial;
-    if (state.accepted && state.edit != nullptr) {
-        const int n = GetWindowTextLengthW(state.edit);
-        std::wstring value(static_cast<std::size_t>(n) + 1, L'\0');
-        GetWindowTextW(state.edit, value.data(), n + 1);
-        value.resize(static_cast<std::size_t>(n));
-        result = utf8(value);
-    }
-    if (owner) EnableWindow(owner, TRUE);
-    DestroyWindow(window);
-    return result;
+    theme::Dialog dialog;
+    dialog.title = wide(title);
+    dialog.heading = wide(title);
+    dialog.text = wide(text);
+    dialog.field = true;
+    dialog.field_value = wide(initial);
+    dialog.buttons = {{IDOK, L"Save", true}, {IDCANCEL, L"Cancel"}};
+    if (theme::run_dialog(owner, dialog) != IDOK) return initial;
+    return utf8(dialog.field_value);
 }
 
 bool disclosure_box(const std::string& title, const std::string& text, HWND owner) {
-    const ScaledDialog dpi;
-    const HINSTANCE instance = GetModuleHandleW(nullptr);
-
-    WNDCLASSW wc{};
-    wc.lpfnWndProc = disclosure_proc;
-    wc.hInstance = instance;
-    wc.hIcon = app_icon();
-    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    wc.hbrBackground = theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kBackground);
-    wc.lpszClassName = kDisclosureClass;
-    RegisterClassW(&wc);
-
-    constexpr int client_width = 540;
-    constexpr int margin = 16;
-    constexpr int content_width = client_width - (margin * 2);
-    constexpr int button_height = 28;
-    constexpr int button_gap = 8;
-    constexpr int bottom_margin = 16;
-    constexpr int row_gap = 14;
-    constexpr int source_width = 96;
-    constexpr int button_width = 82;
-
-    const auto message = wide(text);
-    const int text_height = measure_text_height(message, content_width);
-    const int button_y = margin + text_height + row_gap;
-    const int client_height = button_y + button_height + bottom_margin;
-
-    DisclosureState state;
-    HWND window = centered_dialog(
-        WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT,
-        kDisclosureClass,
-        wide(title),
-        client_width,
-        client_height,
-        instance,
-        &state,
-        owner);
-    if (!window) return false;
-
-    make_control(
-        instance,
-        window,
-        L"STATIC",
-        message,
-        SS_LEFT | SS_NOPREFIX,
-        margin,
-        margin,
-        content_width,
-        text_height + 2,
-        0);
-
-    const int cancel_x = client_width - margin - button_width;
-    const int continue_x = cancel_x - button_gap - button_width;
-    const int source_x = continue_x - button_gap - source_width;
-
-    make_control(
-        instance,
-        window,
-        L"BUTTON",
-        L"View Source",
-        WS_TABSTOP,
-        source_x,
-        button_y,
-        source_width,
-        button_height,
-        kDisclosureSourceButton);
-    make_control(
-        instance,
-        window,
-        L"BUTTON",
-        L"Continue",
-        WS_TABSTOP | BS_DEFPUSHBUTTON,
-        continue_x,
-        button_y,
-        button_width,
-        button_height,
-        IDOK);
-    make_control(
-        instance,
-        window,
-        L"BUTTON",
-        L"Cancel",
-        WS_TABSTOP,
-        cancel_x,
-        button_y,
-        button_width,
-        button_height,
-        IDCANCEL);
-
-    if (owner) EnableWindow(owner, FALSE);
-    theme::apply(window);
-    ShowWindow(window, SW_SHOW);
-    SetForegroundWindow(window);
-
-    MSG msg{};
-    BOOL received = TRUE;
-    while (!state.done && (received = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
-        if (!IsDialogMessageW(window, &msg)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-    if (!received) PostQuitMessage(static_cast<int>(msg.wParam));
-    if (owner) EnableWindow(owner, TRUE);
-    DestroyWindow(window);
-    return state.accepted;
+    theme::Dialog dialog;
+    dialog.title = wide(title);
+    dialog.heading = wide(title);
+    dialog.text = wide(text);
+    dialog.width = 560;
+    dialog.buttons = {{kDisclosureSourceButton, L"View source", false, false},
+                      {IDOK, L"Continue", true}, {IDCANCEL, L"Cancel"}};
+    dialog.on_command = [](int id) {
+        if (id != kDisclosureSourceButton) return;
+        const auto url = wide(kNxapiSourceUrl);
+        ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    };
+    return theme::run_dialog(owner, dialog) == IDOK;
 }
 }  // namespace
 
@@ -761,7 +360,8 @@ void tray_menu(PlatformUi::Impl* ui) {
     if (selected >= kRecentCommand && selected < kRecentCommand + recent_count) {
         const auto& path = s.recent_captures[selected - kRecentCommand];
         const bool copied = ui->dashboard.copy_capture(path);
-        if (!copied) MessageBoxW(ui->dashboard.visible_window(), L"Could not copy this capture.", kAppTitle, MB_OK | MB_ICONINFORMATION);
+        if (!copied) theme::message_box(ui->dashboard.visible_window(), L"The file may have moved or be open in another app.",
+                                        L"Could not copy this capture", MB_OK);
         return;
     }
     invoke(ui, selected);
@@ -967,11 +567,8 @@ bool PlatformUi::confirm(
     if (title == kNxapiDisclosureTitle) {
         return disclosure_box(title, message, impl_->dashboard.visible_window());
     }
-    return MessageBoxW(
-        impl_->dashboard.visible_window(),
-        wide(message).c_str(),
-        wide(title).c_str(),
-        MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES;
+    return theme::message_box(impl_->dashboard.visible_window(), wide(message), wide(title),
+                              MB_YESNO | MB_DEFBUTTON2) == IDYES;
 }
 
 std::string PlatformUi::choose_import_source() {
