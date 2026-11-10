@@ -14,7 +14,7 @@ namespace {
 
 const SecretSchema kCredentialSchema = [] {
     SecretSchema schema{};
-    schema.name = "org.nsoalbumsync.session-token";
+    schema.name = "org.capturedock.session-token";
     schema.flags = SECRET_SCHEMA_NONE;
     schema.attributes[0] = {
         "application",
@@ -27,18 +27,18 @@ const SecretSchema kCredentialSchema = [] {
     return schema;
 }();
 
-constexpr char kApplicationAttribute[] = "NsoAlbumSync";
+constexpr char kApplicationAttribute[] = "CaptureDock";
 constexpr char kLegacyKeyAttribute[] = "session_token";
 constexpr char kNintendoAccountKey[] = "NintendoAccount";
 
 std::string display_name(const std::string& account) {
     if (account == kNintendoAccountKey) {
-        return "NSO Album Sync Nintendo Account session token";
+        return "CaptureDock Nintendo Account session token";
     }
     if (account == "CoralCredential") {
-        return "NSO Album Sync Coral credential cache";
+        return "CaptureDock Coral credential cache";
     }
-    return "NSO Album Sync credential";
+    return "CaptureDock credential";
 }
 
 std::optional<std::string> lookup_key(const std::string& key) {

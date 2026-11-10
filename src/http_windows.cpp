@@ -398,7 +398,7 @@ HttpResponse HttpClient::request(
     }
 
     InternetHandle session(WinHttpOpen(
-        L"NSO Album Sync/2.0",
+        L"CaptureDock/2.0",
         access_type,
         proxy_name,
         proxy_bypass,

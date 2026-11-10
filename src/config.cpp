@@ -49,19 +49,19 @@ std::string environment_variable(const char* name) {
 std::filesystem::path config_directory() {
 #ifdef _WIN32
     const auto app_data = environment_variable("APPDATA");
-    return path_from_utf8(app_data.empty() ? "." : app_data) / "NSOAlbumSync";
+    return path_from_utf8(app_data.empty() ? "." : app_data) / "CaptureDock";
 #elif __APPLE__
     const auto home = environment_variable("HOME");
     return std::filesystem::path(home.empty() ? "." : home) /
-           "Library" / "Application Support" / "NSOAlbumSync";
+           "Library" / "Application Support" / "CaptureDock";
 #else
     const auto xdg_config_home = environment_variable("XDG_CONFIG_HOME");
     if (!xdg_config_home.empty()) {
-        return std::filesystem::path(xdg_config_home) / "NSOAlbumSync";
+        return std::filesystem::path(xdg_config_home) / "CaptureDock";
     }
     const auto home = environment_variable("HOME");
     return std::filesystem::path(home.empty() ? "." : home) /
-           ".config" / "NSOAlbumSync";
+           ".config" / "CaptureDock";
 #endif
 }
 }  // namespace
@@ -69,84 +69,17 @@ std::filesystem::path config_directory() {
 std::string default_album_folder() {
 #ifdef _WIN32
     wchar_t pictures[MAX_PATH]{};
-    wchar_t videos[MAX_PATH]{};
-    const bool has_pictures = SUCCEEDED(SHGetFolderPathW(
-        nullptr, CSIDL_MYPICTURES, nullptr, SHGFP_TYPE_CURRENT, pictures));
-    const bool has_videos = SUCCEEDED(SHGetFolderPathW(
-        nullptr, CSIDL_MYVIDEO, nullptr, SHGFP_TYPE_CURRENT, videos));
-
-    std::vector<std::filesystem::path> candidates;
-    if (has_videos && videos[0] != L'\0') {
-        const std::filesystem::path v(videos);
-        candidates.push_back(v / L"Nintendo Switch 2" / L"Album");
-        candidates.push_back(v / L"Nintendo Switch" / L"Album");
-        candidates.push_back(v / L"Nintendo Switch 2");
-        candidates.push_back(v / L"Nintendo Switch");
+    if (SUCCEEDED(SHGetFolderPathW(
+            nullptr, CSIDL_MYPICTURES, nullptr, SHGFP_TYPE_CURRENT, pictures)) &&
+        pictures[0] != L'\0') {
+        return path_to_utf8(std::filesystem::path(pictures) / L"CaptureDock");
     }
-    if (has_pictures && pictures[0] != L'\0') {
-        const std::filesystem::path p(pictures);
-        candidates.push_back(p / L"Nintendo Switch 2" / L"Album");
-        candidates.push_back(p / L"Nintendo Switch" / L"Album");
-        candidates.push_back(p / L"Nintendo Switch 2");
-        candidates.push_back(p / L"Nintendo Switch");
-    }
-
-    for (const auto& candidate : candidates) {
-        std::error_code ec;
-        if (std::filesystem::exists(candidate, ec)) {
-            return path_to_utf8(candidate);
-        }
-    }
-
-    if (has_pictures && pictures[0] != L'\0') {
-        return path_to_utf8(std::filesystem::path(pictures) / L"Nintendo Switch");
-    }
-    const auto profile = environment_variable("USERPROFILE");
-    return path_to_utf8(path_from_utf8(profile.empty() ? "." : profile) /
-            "Pictures" / "Nintendo Switch");
-#elif __APPLE__
-    const auto home = environment_variable("HOME");
-    const std::filesystem::path base = home.empty() ? "." : home;
-    const std::vector<std::filesystem::path> candidates = {
-        base / "Movies" / "Nintendo Switch 2" / "Album",
-        base / "Movies" / "Nintendo Switch" / "Album",
-        base / "Movies" / "Nintendo Switch 2",
-        base / "Movies" / "Nintendo Switch",
-        base / "Pictures" / "Nintendo Switch 2" / "Album",
-        base / "Pictures" / "Nintendo Switch" / "Album",
-        base / "Pictures" / "Nintendo Switch 2",
-        base / "Pictures" / "Nintendo Switch",
-    };
-
-    for (const auto& candidate : candidates) {
-        std::error_code ec;
-        if (std::filesystem::exists(candidate, ec)) {
-            return path_to_utf8(candidate);
-        }
-    }
-    return (base / "Pictures" / "Nintendo Switch").string();
+    const auto home = environment_variable("USERPROFILE");
 #else
     const auto home = environment_variable("HOME");
-    const std::filesystem::path base = home.empty() ? "." : home;
-    const std::vector<std::filesystem::path> candidates = {
-        base / "Videos" / "Nintendo Switch 2" / "Album",
-        base / "Videos" / "Nintendo Switch" / "Album",
-        base / "Videos" / "Nintendo Switch 2",
-        base / "Videos" / "Nintendo Switch",
-        base / "Pictures" / "Nintendo Switch 2" / "Album",
-        base / "Pictures" / "Nintendo Switch" / "Album",
-        base / "Pictures" / "Nintendo Switch 2",
-        base / "Pictures" / "Nintendo Switch",
-    };
-
-    for (const auto& candidate : candidates) {
-        std::error_code ec;
-        if (std::filesystem::exists(candidate, ec)) {
-            return path_to_utf8(candidate);
-        }
-    }
-    return (base / "Pictures" / "Nintendo Switch").string();
 #endif
+    const auto base = path_from_utf8(home.empty() ? "." : home);
+    return path_to_utf8(base / "Pictures" / "CaptureDock");
 }
 
 namespace {
@@ -268,13 +201,37 @@ AppConfig ConfigManager::snapshot() const {
 
 AppConfig ConfigManager::update(const std::function<void(AppConfig&)>& updater) {
     std::lock_guard lock(mutex_);
+    const auto previous = config_;
     updater(config_);
-    save_locked();
+    const bool changed_session = config_.session_token != previous.session_token;
+    bool stored_securely = false;
+    if (changed_session) {
+        stored_securely = !config_.session_token.empty() && SecureStore::available() &&
+            SecureStore::put(kSecureStoreAccount, config_.session_token);
+        config_.session_storage = config_.session_token.empty()
+            ? SessionStorage::none
+            : stored_securely ? SessionStorage::secure : SessionStorage::session_only;
+    }
+    try {
+        save_locked();
+    } catch (...) {
+        if (!changed_session) {
+            config_ = previous;
+        } else if (!stored_securely || !secure_marker_on_disk_) {
+            if (stored_securely) SecureStore::erase(kSecureStoreAccount);
+            config_.session_storage = legacy_session_marker_.empty()
+                ? SessionStorage::session_only : SessionStorage::legacy;
+        }
+        throw;
+    }
     return config_;
 }
 
 void ConfigManager::load() {
     std::lock_guard lock(mutex_);
+    config_ = {};
+    legacy_session_marker_.clear();
+    secure_marker_on_disk_ = false;
     std::filesystem::create_directories(directory_);
 #ifndef _WIN32
     chmod(directory_.c_str(), 0700);
@@ -337,8 +294,8 @@ void ConfigManager::load() {
                 json, "nxapiAuthClientId", "NxapiAuthClientId",
                 config_.nxapi_auth_client_id);
 
-            // Rich Presence uses one public application identity controlled by
-            // NSO Album Sync. Older builds persisted this 64-bit snowflake as a
+            // Rich Presence uses CaptureDock's public application identity.
+            // Older builds persisted this 64-bit snowflake as a
             // JSON number, which can lose precision because Json stores numbers
             // as doubles. Ignore and remove any legacy override instead.
             config_.discord_application_id = kDiscordApplicationId;
@@ -351,25 +308,24 @@ void ConfigManager::load() {
                 json, "sessionToken", "SessionToken");
 
             if (is_secure_store_marker(stored_session)) {
-                if (const auto token = SecureStore::get(kSecureStoreAccount)) {
+                secure_marker_on_disk_ = true;
+                config_.session_storage = SessionStorage::unavailable;
+                if (const auto token = SecureStore::get(kSecureStoreAccount); token && !token->empty()) {
                     config_.session_token = *token;
+                    config_.session_storage = SessionStorage::secure;
                 }
             } else if (stored_session.empty() || stored_session == kVolatileMarker) {
                 config_.session_token.clear();
 #ifdef _WIN32
             } else if (stored_session.rfind("dpapi:", 0) == 0) {
                 config_.session_token = decrypt_legacy_dpapi_token(stored_session);
-                if (!config_.session_token.empty() &&
-                    SecureStore::put(kSecureStoreAccount, config_.session_token)) {
-                    needs_config_rewrite = true;
-                }
+                config_.session_storage = SessionStorage::legacy;
+                legacy_session_marker_ = stored_session;
 #endif
             } else {
                 config_.session_token = stored_session;
-                if (SecureStore::available() &&
-                    SecureStore::put(kSecureStoreAccount, stored_session)) {
-                    needs_config_rewrite = true;
-                }
+                config_.session_storage = SessionStorage::legacy;
+                legacy_session_marker_ = stored_session;
             }
         } catch (...) {
             // Keep defaults if the config is corrupt or from an unknown version.
@@ -382,8 +338,25 @@ void ConfigManager::load() {
         config_.destination_folder = default_album_folder();
     }
 
-    if (needs_config_rewrite) {
-        save_locked();
+    try {
+        if (config_.session_storage == SessionStorage::legacy) {
+            // Keep the original credential visible until migration succeeds or
+            // the user removes it. New credentials always use the secure store.
+            if (!config_.session_token.empty() && SecureStore::available() &&
+                SecureStore::put(kSecureStoreAccount, config_.session_token)) {
+                config_.session_storage = SessionStorage::secure;
+                try {
+                    save_locked();
+                } catch (...) {
+                    SecureStore::erase(kSecureStoreAccount);
+                    config_.session_storage = SessionStorage::legacy;
+                }
+            }
+        } else if (needs_config_rewrite) {
+            save_locked();
+        }
+    } catch (const std::exception&) {
+        // An unwritable config must not hide the credential recovery controls.
     }
 }
 
@@ -394,11 +367,16 @@ void ConfigManager::save_locked() {
 #endif
 
     std::string session_marker;
-    if (!config_.session_token.empty()) {
-        const bool stored_securely =
-            SecureStore::available() &&
-            SecureStore::put(kSecureStoreAccount, config_.session_token);
-        session_marker = stored_securely ? kSecureMarker : kVolatileMarker;
+    const auto storage = config_.session_storage;
+    const bool secure_marker = storage == SessionStorage::secure || storage == SessionStorage::unavailable;
+    if (secure_marker) {
+        session_marker = kSecureMarker;
+    } else if (storage == SessionStorage::session_only) {
+        session_marker = kVolatileMarker;
+    } else if (storage == SessionStorage::legacy) {
+        // Preserve an existing unmigrated credential until it can be migrated
+        // or the user chooses to remove it. New logins never use this branch.
+        session_marker = legacy_session_marker_;
     }
 
     const Json json(Json::object{
@@ -439,6 +417,8 @@ void ConfigManager::save_locked() {
     chmod(temporary.c_str(), 0600);
 #endif
     replace_config_file(temporary, config_file_);
+    secure_marker_on_disk_ = secure_marker;
+    if (storage != SessionStorage::legacy) legacy_session_marker_.clear();
 #ifndef _WIN32
     chmod(config_file_.c_str(), 0600);
 #endif
@@ -452,8 +432,30 @@ void ConfigManager::save() {
 void ConfigManager::clear_session() {
     std::lock_guard lock(mutex_);
     config_.session_token.clear();
+    config_.session_storage = SessionStorage::none;
+    config_.user_nickname.clear();
     SecureStore::erase(kSecureStoreAccount);
-    save_locked();
+    try {
+        save_locked();
+    } catch (...) {
+        if (!legacy_session_marker_.empty()) config_.session_storage = SessionStorage::legacy;
+        else if (secure_marker_on_disk_) config_.session_storage = SessionStorage::unavailable;
+        throw;
+    }
+}
+
+void ConfigManager::clear_legacy_credential() {
+    std::lock_guard lock(mutex_);
+    if (config_.session_storage != SessionStorage::legacy) return;
+    SecureStore::erase(kSecureStoreAccount);
+    config_.session_storage = config_.session_token.empty()
+        ? SessionStorage::none : SessionStorage::session_only;
+    try {
+        save_locked();
+    } catch (...) {
+        config_.session_storage = SessionStorage::legacy;
+        throw;
+    }
 }
 
 }  // namespace nso

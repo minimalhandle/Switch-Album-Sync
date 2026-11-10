@@ -27,7 +27,7 @@ constexpr char kZncaBaseUrl[] =
 constexpr char kNxapiAuthUrl[] =
     "https://nxapi-auth.fancy.org.uk/api/oauth/token";
 constexpr char kUserAgent[] =
-    "nso-album-sync/2.0.0 (+https://github.com/Dycool/NSO-Album-Sync)";
+    "capturedock/2.0.0 (+https://github.com/minimalhandle/NSO-Album-Sync)";
 constexpr char kZncaClientVersion[] = "d8fAZDPzwimzQ7c6";
 constexpr char kCoralLoginUrl[] =
     "https://api-lp1.znc.srv.nintendo.net/v4/Account/Login";
@@ -256,7 +256,7 @@ std::string NxapiClient::auth_token() {
             }
             if (error_code != "invalid_grant") {
                 throw std::runtime_error(
-                    "nxapi-auth refresh failed: " + response.text());
+                    "nxapi-auth refresh failed (HTTP " + std::to_string(response.status) + ")");
             }
             refresh_token.clear();
             std::lock_guard state_lock(auth_mutex_);
@@ -269,7 +269,7 @@ std::string NxapiClient::auth_token() {
     }
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "nxapi-auth token request failed: " + response.text());
+            "nxapi-auth token request failed (HTTP " + std::to_string(response.status) + ")");
     }
 
     const auto json = Json::parse(response.text());
@@ -385,7 +385,7 @@ std::vector<unsigned char> NxapiClient::encrypted_login_body(
     const auto response = znca_request(
         "POST", "/f", payload.dump(), "application/json", znca_headers(version));
     if (response.status / 100 != 2) {
-        throw std::runtime_error("nxapi /f failed: " + response.text());
+        throw std::runtime_error("nxapi /f failed (HTTP " + std::to_string(response.status) + ")");
     }
     const auto encrypted =
         Json::parse(response.text()).string("encrypted_token_request");
@@ -416,7 +416,7 @@ FAttestation NxapiClient::generate_f(
     const auto response = znca_request(
         "POST", "/f", payload.dump(), "application/json", znca_headers(version));
     if (response.status / 100 != 2) {
-        throw std::runtime_error("nxapi /f failed: " + response.text());
+        throw std::runtime_error("nxapi /f failed (HTTP " + std::to_string(response.status) + ")");
     }
     const auto json = Json::parse(response.text());
     FAttestation attestation;
@@ -424,7 +424,7 @@ FAttestation NxapiClient::generate_f(
     attestation.request_id = json.string("request_id");
     attestation.timestamp = json.integer("timestamp");
     if (attestation.f.empty() || attestation.request_id.empty() || attestation.timestamp == 0) {
-        throw std::runtime_error("nxapi /f returned incomplete attestation: " + response.text());
+        throw std::runtime_error("nxapi /f returned incomplete attestation");
     }
     return attestation;
 }
@@ -459,7 +459,7 @@ std::vector<unsigned char> NxapiClient::encrypted_web_service_token_body(
         "POST", "/f", payload.dump(), "application/json", znca_headers(version));
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "nxapi /f (hash_method 2) failed: " + response.text());
+            "nxapi /f (hash_method 2) failed (HTTP " + std::to_string(response.status) + ")");
     }
     const auto encrypted =
         Json::parse(response.text()).string("encrypted_token_request");
@@ -485,7 +485,7 @@ std::vector<unsigned char> NxapiClient::encrypt_request(
         znca_headers(version));
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "nxapi /encrypt-request failed: " + response.text());
+            "nxapi /encrypt-request failed (HTTP " + std::to_string(response.status) + ")");
     }
     const auto encrypted = Json::parse(response.text()).string("data");
     if (encrypted.empty()) {
@@ -503,7 +503,7 @@ std::string NxapiClient::decrypt_response(
         znca_headers(version));
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "nxapi /decrypt-response failed: " + response.text());
+            "nxapi /decrypt-response failed (HTTP " + std::to_string(response.status) + ")");
     }
     return response.text();
 }

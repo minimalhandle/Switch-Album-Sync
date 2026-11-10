@@ -31,6 +31,7 @@ namespace {
 
 enum MenuCommand : NSInteger {
     SyncNow = 1,
+    RetryFailed,
     CopyLastCapture,
     ToggleAutoSync,
     ToggleNotifications,
@@ -44,6 +45,9 @@ enum MenuCommand : NSInteger {
     ToggleStartOnBoot,
     ConfigureProxy,
     SignInOrOut,
+    PasteSignIn,
+    CancelSignIn,
+    ClearLegacyCredential,
     Exit,
 };
 
@@ -64,7 +68,7 @@ std::filesystem::path launch_agent_file() {
     return std::filesystem::path(home ? home : ".") /
            "Library" /
            "LaunchAgents" /
-           "org.dycool.nso-album-sync.plist";
+           "io.github.minimalhandle.capturedock.plist";
 }
 
 std::string executable_path() {
@@ -106,6 +110,9 @@ void dispatch_menu_action(PlatformUi::Impl* impl, NSInteger command) {
         case SyncNow:
             callbacks.sync_now();
             break;
+        case RetryFailed:
+            callbacks.retry_failed();
+            break;
         case CopyLastCapture:
             callbacks.copy_last_capture();
             break;
@@ -141,6 +148,15 @@ void dispatch_menu_action(PlatformUi::Impl* impl, NSInteger command) {
         case SignInOrOut:
             callbacks.sign_in_out();
             break;
+        case PasteSignIn:
+            callbacks.paste_sign_in_link();
+            break;
+        case CancelSignIn:
+            callbacks.cancel_sign_in();
+            break;
+        case ClearLegacyCredential:
+            callbacks.clear_legacy_credential();
+            break;
         case Exit:
             callbacks.exit();
             break;
@@ -149,14 +165,14 @@ void dispatch_menu_action(PlatformUi::Impl* impl, NSInteger command) {
 
 }  // namespace nso
 
-@interface NsoMenuTarget : NSObject {
+@interface CaptureDockMenuTarget : NSObject {
 @public
     nso::PlatformUi::Impl* impl;
 }
 - (void)action:(id)sender;
 @end
 
-@implementation NsoMenuTarget
+@implementation CaptureDockMenuTarget
 - (void)action:(id)sender {
     nso::dispatch_menu_action(impl, [sender tag]);
 }
@@ -165,10 +181,10 @@ void dispatch_menu_action(PlatformUi::Impl* impl, NSInteger command) {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
-@interface NsoNotificationDelegate : NSObject <UNUserNotificationCenterDelegate, NSUserNotificationCenterDelegate>
+@interface CaptureDockNotificationDelegate : NSObject <UNUserNotificationCenterDelegate, NSUserNotificationCenterDelegate>
 @end
 
-@implementation NsoNotificationDelegate
+@implementation CaptureDockNotificationDelegate
 - (void)userNotificationCenter:(UNUserNotificationCenter*)center
        willPresentNotification:(UNNotification*)notification
          withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler {
@@ -195,8 +211,8 @@ constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
 constexpr char kNxapiSourceUrl[] =
     "https://github.com/samuelthomas2774/nxapi-znca-api";
 
-NsoMenuTarget* g_menu_target = nil;
-NsoNotificationDelegate* g_notification_delegate = nil;
+CaptureDockMenuTarget* g_menu_target = nil;
+CaptureDockNotificationDelegate* g_notification_delegate = nil;
 
 void decorate_menu_item(NSMenuItem* item, NSString* symbol) {
     if (item == nil || symbol == nil) {
@@ -283,6 +299,10 @@ void rebuild_menu(PlatformUi::Impl* impl) {
         false,
         state.signed_in && !state.sync_busy,
         @"arrow.triangle.2.circlepath");
+    if (state.retry_available) {
+        add_menu_item(impl->menu, @"Retry Failed Captures", RetryFailed,
+            false, state.signed_in && !state.sync_busy, @"arrow.clockwise");
+    }
     add_menu_item(
         impl->menu,
         auto_sync_title(state.sync_interval_minutes),
@@ -300,24 +320,26 @@ void rebuild_menu(PlatformUi::Impl* impl) {
     [impl->menu addItem:[NSMenuItem separatorItem]];
     add_menu_item(impl->menu, @"Notifications", ToggleNotifications,
         state.notifications, true, @"bell");
-    auto* rpc = [[NSMenu alloc] initWithTitle:@"Discord Rich Presence"];
-    rpc.autoenablesItems = NO;
-    auto* rpc_item = add_menu_item(impl->menu, @"Discord Rich Presence", 0,
-        false, true, @"person.2.wave.2");
-    rpc_item.submenu = rpc;
-    add_menu_item(rpc, @"Enabled", ToggleDiscord, state.discord);
-    [rpc addItem:[NSMenuItem separatorItem]];
-    add_menu_item(rpc, @"Show Switch username", RpcUsername,
-        state.rpc.show_profile_picture && state.rpc.show_username, state.rpc.show_profile_picture);
-    add_menu_item(rpc, @"Show profile picture", RpcProfilePicture, state.rpc.show_profile_picture);
-    add_menu_item(rpc, @"Show total play time", RpcPlayTime, state.rpc.show_play_time);
-    [rpc addItem:[NSMenuItem separatorItem]];
-    add_menu_item(rpc, @"Zelda Notes live location", RpcZelda, state.rpc.zelda);
-    add_menu_item(rpc, @"Animal Crossing details", RpcAnimalCrossing, state.rpc.animal_crossing);
-    add_menu_item(rpc, @"Splatoon 3 details", RpcSplatoon3, state.rpc.splatoon3);
-    add_menu_item(rpc, @"Splatoon 2 details", RpcSplatoon2, state.rpc.splatoon2);
-    [rpc addItem:[NSMenuItem separatorItem]];
-    add_menu_item(rpc, @"Refresh Now", RpcRefresh, false, state.discord && state.signed_in);
+    if (state.discord_available) {
+        auto* rpc = [[NSMenu alloc] initWithTitle:@"Discord Rich Presence"];
+        rpc.autoenablesItems = NO;
+        auto* rpc_item = add_menu_item(impl->menu, @"Discord Rich Presence", 0,
+            false, true, @"person.2.wave.2");
+        rpc_item.submenu = rpc;
+        add_menu_item(rpc, @"Enabled", ToggleDiscord, state.discord);
+        [rpc addItem:[NSMenuItem separatorItem]];
+        add_menu_item(rpc, @"Show Switch username", RpcUsername,
+            state.rpc.show_profile_picture && state.rpc.show_username, state.rpc.show_profile_picture);
+        add_menu_item(rpc, @"Show profile picture", RpcProfilePicture, state.rpc.show_profile_picture);
+        add_menu_item(rpc, @"Show total play time", RpcPlayTime, state.rpc.show_play_time);
+        [rpc addItem:[NSMenuItem separatorItem]];
+        add_menu_item(rpc, @"Zelda Notes live location", RpcZelda, state.rpc.zelda);
+        add_menu_item(rpc, @"Animal Crossing details", RpcAnimalCrossing, state.rpc.animal_crossing);
+        add_menu_item(rpc, @"Splatoon 3 details", RpcSplatoon3, state.rpc.splatoon3);
+        add_menu_item(rpc, @"Splatoon 2 details", RpcSplatoon2, state.rpc.splatoon2);
+        [rpc addItem:[NSMenuItem separatorItem]];
+        add_menu_item(rpc, @"Refresh Now", RpcRefresh, false, state.discord && state.signed_in);
+    }
 
     [impl->menu addItem:[NSMenuItem separatorItem]];
     add_menu_item(
@@ -350,13 +372,21 @@ void rebuild_menu(PlatformUi::Impl* impl) {
         false,
         true,
         @"network");
-    add_menu_item(
-        impl->menu,
-        state.signed_in ? @"Sign Out" : @"Sign In to Nintendo Account…",
-        SignInOrOut,
-        false,
-        true,
-        state.signed_in ? @"rectangle.portrait.and.arrow.right" : @"person.crop.circle.badge.plus");
+    if (state.sign_in_pending) {
+        if (state.manual_sign_in) {
+            add_menu_item(impl->menu, @"Paste Sign-In Link…", PasteSignIn,
+                false, true, @"link");
+        }
+        add_menu_item(impl->menu, @"Cancel Sign-In", CancelSignIn, false, true, @"xmark.circle");
+    } else {
+        add_menu_item(impl->menu, state.signed_in ? @"Sign Out" : @"Sign In to Nintendo Account…",
+            SignInOrOut, false, true,
+            state.signed_in ? @"rectangle.portrait.and.arrow.right" : @"person.crop.circle.badge.plus");
+    }
+    if (state.legacy_credential) {
+        add_menu_item(impl->menu, @"Clear Legacy Credential…", ClearLegacyCredential,
+            false, !state.sign_in_pending, @"trash");
+    }
 
     [impl->menu addItem:[NSMenuItem separatorItem]];
     add_menu_item(
@@ -369,7 +399,7 @@ void rebuild_menu(PlatformUi::Impl* impl) {
 }
 
 void deliver_notification(NSString* title, NSString* message) {
-    NSString* safeTitle = title != nil ? title : @"NSO Album Sync";
+    NSString* safeTitle = title != nil ? title : @"CaptureDock";
     NSString* safeMessage = message != nil ? message : @"";
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
@@ -389,7 +419,7 @@ void deliver_notification(NSString* title, NSString* message) {
             [task launch];
             [task waitUntilExit];
         } @catch (NSException* e) {
-            NSLog(@"NSO Album Sync notification failed: %@", e);
+            NSLog(@"CaptureDock notification failed: %@", e);
         }
     });
 }
@@ -413,13 +443,13 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
 
         register_nintendo_auth_protocol();
 
-        g_notification_delegate = [NsoNotificationDelegate new];
+        g_notification_delegate = [CaptureDockNotificationDelegate new];
         [UNUserNotificationCenter currentNotificationCenter].delegate =
             g_notification_delegate;
         [NSUserNotificationCenter defaultUserNotificationCenter].delegate =
             g_notification_delegate;
 
-        g_menu_target = [NsoMenuTarget new];
+        g_menu_target = [CaptureDockMenuTarget new];
         g_menu_target->impl = impl_;
 
         impl_->status_item = [[NSStatusBar systemStatusBar]
@@ -435,14 +465,14 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
         if (app_icon != nil) {
             [NSApp setApplicationIconImage:app_icon];
             NSImage* status_icon = [app_icon copy];
-            [status_icon setTemplate:YES];
+            [status_icon setTemplate:NO];
             [status_icon setSize:NSMakeSize(18.0, 18.0)];
             impl_->status_item.button.image = status_icon;
             impl_->status_item.button.imagePosition = NSImageOnly;
         } else {
-            impl_->status_item.button.title = @"NSO";
+            impl_->status_item.button.title = @"CD";
         }
-        impl_->status_item.button.toolTip = @"NSO Album Sync";
+        impl_->status_item.button.toolTip = @"CaptureDock";
 
         impl_->menu = [NSMenu new];
         impl_->menu.autoenablesItems = NO;
@@ -592,7 +622,7 @@ std::string PlatformUi::choose_folder(const std::string& initial) {
         auto* panel = [NSOpenPanel openPanel];
         panel.title = @"Choose Album Folder";
         panel.prompt = @"Choose Folder";
-        panel.message = @"Select where NSO Album Sync should save your album captures.";
+        panel.message = @"Select where CaptureDock should save your album captures.";
         panel.canChooseDirectories = YES;
         panel.canChooseFiles = NO;
         panel.canCreateDirectories = YES;
@@ -640,7 +670,7 @@ void set_start_on_boot(bool enabled) {
         << "<plist version=\"1.0\">\n"
         << "<dict>\n"
         << "  <key>Label</key>\n"
-        << "  <string>org.dycool.nso-album-sync</string>\n"
+        << "  <string>io.github.minimalhandle.capturedock</string>\n"
         << "  <key>ProgramArguments</key>\n"
         << "  <array><string>" << escaped_path << "</string></array>\n"
         << "  <key>RunAtLoad</key>\n"

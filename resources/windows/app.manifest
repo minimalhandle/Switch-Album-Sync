@@ -3,9 +3,9 @@
   <assemblyIdentity
     version="2.0.0.0"
     processorArchitecture="*"
-    name="Dycool.NSOAlbumSync"
+    name="io.github.minimalhandle.CaptureDock"
     type="win32" />
-  <description>NSO Album Sync</description>
+  <description>CaptureDock</description>
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>

@@ -5,11 +5,11 @@
 #import <Cocoa/Cocoa.h>
 #import <CoreServices/CoreServices.h>
 
-@interface NsoAuthUrlDelegate : NSObject <NSApplicationDelegate>
+@interface CaptureDockAuthUrlDelegate : NSObject <NSApplicationDelegate>
 - (void)handleGetURLEvent:(NSAppleEventDescriptor*)event withReplyEvent:(NSAppleEventDescriptor*)replyEvent;
 @end
 
-@implementation NsoAuthUrlDelegate
+@implementation CaptureDockAuthUrlDelegate
 - (void)handleGetURLEvent:(NSAppleEventDescriptor*)event withReplyEvent:(NSAppleEventDescriptor*)replyEvent {
     (void)replyEvent;
     NSString* urlString = [[event paramDescriptorForKeyword:keyDirectObject] stringValue];
@@ -45,12 +45,12 @@
 namespace nso {
 namespace {
 
-NsoAuthUrlDelegate* g_auth_url_delegate = nil;
+CaptureDockAuthUrlDelegate* g_auth_url_delegate = nil;
 
 void install_auth_delegate() {
     static dispatch_once_t once_token;
     dispatch_once(&once_token, ^{
-        g_auth_url_delegate = [NsoAuthUrlDelegate new];
+        g_auth_url_delegate = [CaptureDockAuthUrlDelegate new];
         [[NSAppleEventManager sharedAppleEventManager]
             setEventHandler:g_auth_url_delegate
             andSelector:@selector(handleGetURLEvent:withReplyEvent:)
@@ -63,27 +63,28 @@ void install_auth_delegate() {
 }  // namespace
 
 bool register_nintendo_auth_protocol() {
-    install_auth_delegate();
-
     NSBundle* main_bundle = [NSBundle mainBundle];
     NSString* bundle_id = [main_bundle bundleIdentifier];
     NSURL* bundle_url = [main_bundle bundleURL];
+    if (bundle_id == nil || bundle_url == nil) return false;
 
-    if (bundle_url != nil) {
+    const CFStringRef scheme = CFSTR("npf71b963c1b7b6d119");
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        LSRegisterURL((__bridge CFURLRef)bundle_url, true);
-#pragma clang diagnostic pop
+    const auto handler = LSCopyDefaultHandlerForURLScheme(scheme);
+    if (handler != nullptr) {
+        const bool ours = CFEqual(handler, (__bridge CFStringRef)bundle_id);
+        CFRelease(handler);
+        if (!ours) return false;
+        install_auth_delegate();
+        return true;
     }
-
-    if (bundle_id != nil) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        LSSetDefaultHandlerForURLScheme(
-            CFSTR("npf71b963c1b7b6d119"), (CFStringRef)bundle_id);
-#pragma clang diagnostic pop
+    if (LSRegisterURL((__bridge CFURLRef)bundle_url, true) != noErr ||
+        LSSetDefaultHandlerForURLScheme(scheme, (__bridge CFStringRef)bundle_id) != noErr) {
+        return false;
     }
-
+#pragma clang diagnostic pop
+    install_auth_delegate();
     return true;
 }
 

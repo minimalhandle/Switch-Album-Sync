@@ -15,6 +15,8 @@ inline constexpr char kNintendoAuthCallbackPrefix[] = "npf71b963c1b7b6d119://aut
 std::filesystem::path application_runtime_directory();
 
 bool is_nintendo_auth_callback(const std::string& url);
+// Automatic browser return is optional. A false result leaves an existing
+// handler alone so the app can accept the complete callback link manually.
 bool register_nintendo_auth_protocol();
 void unregister_nintendo_auth_protocol();
 bool publish_nintendo_auth_callback(const std::string& url);

@@ -445,7 +445,7 @@ std::string CoralClient::ensure_session(const std::string& session_token) {
             });
 
         std::string decoded;
-        if (!response.body.empty()) {
+        if (response.status / 100 == 2 && !response.body.empty()) {
             try {
                 decoded = nxapi_.decrypt_response(response.body);
             } catch (...) {
@@ -468,8 +468,7 @@ std::string CoralClient::ensure_session(const std::string& session_token) {
     const auto& decrypted_login = login_attempt.second;
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "Coral login failed (HTTP " + std::to_string(response.status) + ")" +
-            (decrypted_login.empty() ? std::string{} : ": " + decrypted_login));
+            "Coral login failed (HTTP " + std::to_string(response.status) + ")");
     }
     if (decrypted_login.empty()) {
         throw std::runtime_error("Coral login returned an empty response");
@@ -537,16 +536,8 @@ Json CoralClient::coral_call(
         if (response.status == 401 || response.status == 403) {
             clear_cached_session();
         }
-        std::string detail;
-        if (!response.body.empty()) {
-            try {
-                detail = nxapi_.decrypt_response(response.body);
-            } catch (...) {
-            }
-        }
         throw std::runtime_error(
-            "Coral request failed (HTTP " + std::to_string(response.status) + ")" +
-            (detail.empty() ? std::string{} : ": " + detail));
+            "Coral request failed (HTTP " + std::to_string(response.status) + ")");
     }
     return Json::parse(nxapi_.decrypt_response(response.body));
 }
@@ -557,11 +548,18 @@ std::vector<MediaItem> CoralClient::media_list(
     const auto response = coral_call(
         coral_url(kMediaListPath), access_token, R"({"parameter":{}})");
 
+    if (!response.is_object() || response.integer("status", 0) != 0) {
+        throw std::runtime_error("Nintendo album request failed");
+    }
+
     std::vector<MediaItem> media;
     const auto* result = response.find("result");
-    if (result == nullptr) return media;
+    if (result == nullptr || result->is_null()) return media;
     const auto* media_json = result->find("media");
-    if (media_json == nullptr || !media_json->is_array()) return media;
+    if (!result->is_object() || (media_json && !media_json->is_null() && !media_json->is_array())) {
+        throw std::runtime_error("Nintendo album returned an unexpected response");
+    }
+    if (media_json == nullptr || media_json->is_null()) return media;
 
     media.reserve(media_json->as_array().size());
     for (const auto& item : media_json->as_array()) {
@@ -707,7 +705,7 @@ std::string CoralClient::get_web_service_token(
                 });
 
             std::string decoded;
-            if (!response.body.empty()) {
+            if (response.status / 100 == 2 && !response.body.empty()) {
                 try {
                     decoded = nxapi_.decrypt_response(response.body);
                 } catch (...) {
@@ -734,8 +732,7 @@ std::string CoralClient::get_web_service_token(
             }
             throw std::runtime_error(
                 "Coral GetWebServiceToken failed (HTTP " +
-                std::to_string(response.status) + ")" +
-                (decrypted.empty() ? std::string{} : ": " + decrypted));
+                std::to_string(response.status) + ")");
         }
         if (decrypted.empty()) return {};
 

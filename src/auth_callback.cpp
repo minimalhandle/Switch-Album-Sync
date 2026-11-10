@@ -47,25 +47,25 @@ std::filesystem::path runtime_directory_candidate() {
 #ifdef _WIN32
     const auto local_app_data = environment_variable("LOCALAPPDATA");
     if (!local_app_data.empty()) {
-        return std::filesystem::path(local_app_data) / "NSOAlbumSync" / "Runtime";
+        return std::filesystem::path(local_app_data) / "CaptureDock" / "Runtime";
     }
     std::error_code error;
     const auto temporary = std::filesystem::temp_directory_path(error);
-    return error ? std::filesystem::path{} : temporary / "NSOAlbumSync" / "Runtime";
+    return error ? std::filesystem::path{} : temporary / "CaptureDock" / "Runtime";
 #elif __APPLE__
     const auto home = environment_variable("HOME");
     if (home.empty()) return {};
     return std::filesystem::path(home) /
-           "Library" / "Caches" / "NSOAlbumSync" / "Runtime";
+           "Library" / "Caches" / "CaptureDock" / "Runtime";
 #else
     const auto xdg_runtime = environment_variable("XDG_RUNTIME_DIR");
     if (!xdg_runtime.empty()) {
-        return std::filesystem::path(xdg_runtime) / "NSOAlbumSync";
+        return std::filesystem::path(xdg_runtime) / "CaptureDock";
     }
     const auto home = environment_variable("HOME");
     if (home.empty()) return {};
     return std::filesystem::path(home) /
-           ".cache" / "NSOAlbumSync" / "runtime";
+           ".cache" / "CaptureDock" / "runtime";
 #endif
 }
 

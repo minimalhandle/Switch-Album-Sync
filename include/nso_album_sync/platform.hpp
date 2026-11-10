@@ -1,10 +1,14 @@
 #pragma once
 
 #include "nso_album_sync/rpc_settings.hpp"
+#include "nso_album_sync/json.hpp"
+#include <memory>
+#include <cstdint>
 
 #include <filesystem>
 #include <functional>
 #include <string>
+#include <vector>
 
 #if defined(__linux__) && defined(NSO_HAVE_GTK)
 #include <gtk/gtk.h>
@@ -80,24 +84,56 @@ inline gboolean gtk_clipboard_set_uris_compat(
 
 namespace nso {
 
+struct LocalCapture {
+    std::filesystem::path path;
+    std::filesystem::path game_folder;
+    std::int64_t modified = 0;
+    std::uintmax_t bytes = 0;
+    bool video = false;
+    std::int64_t added_ms = 0;
+};
+
 struct MenuState {
     std::string nickname;
     std::string last_sync;
     std::string status;
+    std::filesystem::path destination;
+    std::string next_sync;
+    std::string sync_detail;
+    std::string credential_status;
+    std::string diagnostics;
+    std::vector<std::filesystem::path> recent_captures;
+    std::shared_ptr<const std::vector<LocalCapture>> capture_library;
+    std::filesystem::path settings_directory;
+    std::shared_ptr<const Json::array> sync_history;
+    std::string retry_scope;
+    std::size_t sync_completed = 0;
+    std::size_t sync_total = 0;
 
     bool auto_sync = false;
     bool notifications = false;
     bool discord = false;
+    bool discord_available = false;
     RpcSettings rpc;
     bool start_on_boot = false;
     bool signed_in = false;
+    bool sign_in_pending = false;
+    bool manual_sign_in = false;
     bool sync_busy = false;
+    bool retry_available = false;
+    bool legacy_credential = false;
+    bool recent_loading = false;
     int sync_interval_minutes = 60;
 };
 
 struct PlatformCallbacks {
+    std::function<void()> import_captures;
     std::function<void()> ready;
     std::function<void()> sync_now;
+    std::function<void()> retry_failed;
+    std::function<void(const std::string&, const std::string&)> retry_capture;
+    std::function<void()> refresh_captures;
+    std::function<void()> clear_legacy_credential;
     std::function<void()> copy_last_capture;
     std::function<void()> toggle_auto;
     std::function<void()> toggle_notifications;
@@ -115,6 +151,8 @@ struct PlatformCallbacks {
     std::function<void()> toggle_start;
     std::function<void()> proxy;
     std::function<void()> sign_in_out;
+    std::function<void()> cancel_sign_in;
+    std::function<void()> paste_sign_in_link;
     std::function<void()> exit;
 };
 
@@ -127,6 +165,10 @@ public:
     void stop();
     void update(const MenuState& state);
     void notify(const std::string& title, const std::string& message);
+#ifdef _WIN32
+    void notify_captures(const std::string& title, const std::string& message,
+                         std::vector<std::filesystem::path> captures);
+#endif
     bool copy_file_to_clipboard(const std::filesystem::path& path);
 
     std::string prompt(
@@ -136,6 +178,9 @@ public:
 
     bool confirm(const std::string& title, const std::string& message);
     std::string choose_folder(const std::string& initial);
+#ifdef _WIN32
+    std::string choose_import_source();
+#endif
 
     struct Impl;
 
@@ -145,5 +190,8 @@ private:
 
 void set_start_on_boot(bool enabled);
 bool start_on_boot_enabled();
+#ifdef _WIN32
+bool show_running_dashboard();
+#endif
 
 }  // namespace nso

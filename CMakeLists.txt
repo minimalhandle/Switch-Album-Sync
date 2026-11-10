@@ -1,8 +1,8 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(
-    nso-album-sync
-    VERSION 1.2.2
+    CaptureDock
+    VERSION 1.0.0
     LANGUAGES CXX
 )
 
@@ -20,6 +20,7 @@ option(
     "Use GTK/AppIndicator tray on Linux when available"
     ON
 )
+option(NSO_ENABLE_DISCORD "Build Discord Rich Presence using the Discord Social SDK" ON)
 set(
     NSO_MACOS_CODESIGN_IDENTITY
     "-"
@@ -73,75 +74,78 @@ if(NOT WIN32)
 endif()
 find_package(PkgConfig QUIET)
 
-# Rich Presence uses Discord's current Social SDK only. CI checks out the
-# private SDK cache directly at NSO_DISCORD_SOCIAL_SDK_ROOT. Local builds can
-# point this variable at an official SDK extracted from the Developer Portal.
-# The desktop Rich Presence path does not use Discord OAuth, bot tokens,
-# client secrets, or Client::Connect().
-if(NOT EXISTS "${NSO_DISCORD_SOCIAL_SDK_ROOT}/include/discordpp.h" OR
-   NOT EXISTS "${NSO_DISCORD_SOCIAL_SDK_ROOT}/include/cdiscord.h")
-    message(FATAL_ERROR
-        "Discord Social SDK ${NSO_DISCORD_SOCIAL_SDK_VERSION} was not found at "
-        "${NSO_DISCORD_SOCIAL_SDK_ROOT}. Extract the official standalone C++ SDK "
-        "there or set -DNSO_DISCORD_SOCIAL_SDK_ROOT=<path>."
-    )
-endif()
-
 set(NSO_THIRD_PARTY_NOTICES "${CMAKE_SOURCE_DIR}/THIRD-PARTY-NOTICES.txt")
 if(NOT EXISTS "${NSO_THIRD_PARTY_NOTICES}")
     message(FATAL_ERROR "THIRD-PARTY-NOTICES.txt is required for release packaging")
 endif()
-
-set(NSO_DISCORD_SDK_INCLUDE_DIR "${NSO_DISCORD_SOCIAL_SDK_ROOT}/include")
-set(NSO_DISCORD_SDK_RESOURCE_ID 201)
 set(NSO_THIRD_PARTY_NOTICES_RESOURCE_ID 202)
-set(NSO_DISCORD_SDK_IS_FRAMEWORK FALSE)
 
-if(WIN32)
-    if(NOT MSVC)
-        message(FATAL_ERROR "Discord Social SDK Windows builds currently require MSVC")
+if(NSO_ENABLE_DISCORD)
+    # Rich Presence uses Discord's current Social SDK only. CI checks out the
+    # private SDK cache directly at NSO_DISCORD_SOCIAL_SDK_ROOT. Local builds can
+    # point this variable at an official SDK extracted from the Developer Portal.
+    # The desktop Rich Presence path does not use Discord OAuth, bot tokens,
+    # client secrets, or Client::Connect().
+    if(NOT EXISTS "${NSO_DISCORD_SOCIAL_SDK_ROOT}/include/discordpp.h" OR
+       NOT EXISTS "${NSO_DISCORD_SOCIAL_SDK_ROOT}/include/cdiscord.h")
+        message(FATAL_ERROR
+            "Discord Social SDK ${NSO_DISCORD_SOCIAL_SDK_VERSION} was not found at "
+            "${NSO_DISCORD_SOCIAL_SDK_ROOT}. Extract the official standalone C++ SDK "
+            "there, set -DNSO_DISCORD_SOCIAL_SDK_ROOT=<path>, or configure with "
+            "-DNSO_ENABLE_DISCORD=OFF."
+        )
     endif()
-    set(NSO_DISCORD_SDK_LINK_LIBRARY
-        "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/discord_partner_sdk.lib")
-    set(NSO_DISCORD_SDK_RUNTIME
-        "${NSO_DISCORD_SOCIAL_SDK_ROOT}/bin/release/discord_partner_sdk.dll")
-elseif(APPLE)
-    # Discord Social SDK 1.10+ packages macOS as a versioned framework. Prefer
-    # the real versioned Mach-O binary so a cache populated through GitHub's web
-    # uploader still works even if the framework symlinks became marker files.
-    set(NSO_DISCORD_SDK_FRAMEWORK
-        "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/discord_partner_sdk.framework")
-    set(NSO_DISCORD_SDK_FRAMEWORK_BINARY
-        "${NSO_DISCORD_SDK_FRAMEWORK}/discord_partner_sdk")
-    set(NSO_DISCORD_SDK_FRAMEWORK_VERSIONED_BINARY
-        "${NSO_DISCORD_SDK_FRAMEWORK}/Versions/A/discord_partner_sdk")
-    if(EXISTS "${NSO_DISCORD_SDK_FRAMEWORK_VERSIONED_BINARY}")
-        set(NSO_DISCORD_SDK_IS_FRAMEWORK TRUE)
+
+    set(NSO_DISCORD_SDK_INCLUDE_DIR "${NSO_DISCORD_SOCIAL_SDK_ROOT}/include")
+    set(NSO_DISCORD_SDK_RESOURCE_ID 201)
+    set(NSO_DISCORD_SDK_IS_FRAMEWORK FALSE)
+
+    if(WIN32)
+        if(NOT MSVC)
+            message(FATAL_ERROR "Discord Social SDK Windows builds currently require MSVC")
+        endif()
         set(NSO_DISCORD_SDK_LINK_LIBRARY
-            "${NSO_DISCORD_SDK_FRAMEWORK_VERSIONED_BINARY}")
-        set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_FRAMEWORK}")
-    elseif(EXISTS "${NSO_DISCORD_SDK_FRAMEWORK_BINARY}")
-        set(NSO_DISCORD_SDK_IS_FRAMEWORK TRUE)
-        set(NSO_DISCORD_SDK_LINK_LIBRARY "${NSO_DISCORD_SDK_FRAMEWORK_BINARY}")
-        set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_FRAMEWORK}")
+            "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/discord_partner_sdk.lib")
+        set(NSO_DISCORD_SDK_RUNTIME
+            "${NSO_DISCORD_SOCIAL_SDK_ROOT}/bin/release/discord_partner_sdk.dll")
+    elseif(APPLE)
+        # Discord Social SDK 1.10+ packages macOS as a versioned framework. Prefer
+        # the real versioned Mach-O binary so a cache populated through GitHub's web
+        # uploader still works even if the framework symlinks became marker files.
+        set(NSO_DISCORD_SDK_FRAMEWORK
+            "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/discord_partner_sdk.framework")
+        set(NSO_DISCORD_SDK_FRAMEWORK_BINARY
+            "${NSO_DISCORD_SDK_FRAMEWORK}/discord_partner_sdk")
+        set(NSO_DISCORD_SDK_FRAMEWORK_VERSIONED_BINARY
+            "${NSO_DISCORD_SDK_FRAMEWORK}/Versions/A/discord_partner_sdk")
+        if(EXISTS "${NSO_DISCORD_SDK_FRAMEWORK_VERSIONED_BINARY}")
+            set(NSO_DISCORD_SDK_IS_FRAMEWORK TRUE)
+            set(NSO_DISCORD_SDK_LINK_LIBRARY
+                "${NSO_DISCORD_SDK_FRAMEWORK_VERSIONED_BINARY}")
+            set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_FRAMEWORK}")
+        elseif(EXISTS "${NSO_DISCORD_SDK_FRAMEWORK_BINARY}")
+            set(NSO_DISCORD_SDK_IS_FRAMEWORK TRUE)
+            set(NSO_DISCORD_SDK_LINK_LIBRARY "${NSO_DISCORD_SDK_FRAMEWORK_BINARY}")
+            set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_FRAMEWORK}")
+        else()
+            set(NSO_DISCORD_SDK_LINK_LIBRARY
+                "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/libdiscord_partner_sdk.dylib")
+            set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_LINK_LIBRARY}")
+        endif()
     else()
         set(NSO_DISCORD_SDK_LINK_LIBRARY
-            "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/libdiscord_partner_sdk.dylib")
+            "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/libdiscord_partner_sdk.so")
         set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_LINK_LIBRARY}")
     endif()
-else()
-    set(NSO_DISCORD_SDK_LINK_LIBRARY
-        "${NSO_DISCORD_SOCIAL_SDK_ROOT}/lib/release/libdiscord_partner_sdk.so")
-    set(NSO_DISCORD_SDK_RUNTIME "${NSO_DISCORD_SDK_LINK_LIBRARY}")
-endif()
 
-if(NOT EXISTS "${NSO_DISCORD_SDK_LINK_LIBRARY}" OR
-   NOT EXISTS "${NSO_DISCORD_SDK_RUNTIME}")
-    message(FATAL_ERROR
-        "Discord Social SDK ${NSO_DISCORD_SOCIAL_SDK_VERSION} is missing the "
-        "release runtime/link library required for this platform under "
-        "${NSO_DISCORD_SOCIAL_SDK_ROOT}."
-    )
+    if(NOT EXISTS "${NSO_DISCORD_SDK_LINK_LIBRARY}" OR
+       NOT EXISTS "${NSO_DISCORD_SDK_RUNTIME}")
+        message(FATAL_ERROR
+            "Discord Social SDK ${NSO_DISCORD_SOCIAL_SDK_VERSION} is missing the "
+            "release runtime/link library required for this platform under "
+            "${NSO_DISCORD_SOCIAL_SDK_ROOT}."
+        )
+    endif()
 endif()
 
 set(NSO_SOURCES
@@ -153,6 +157,7 @@ set(NSO_SOURCES
     src/discord.cpp
     src/game_services.cpp
     src/json.cpp
+    src/local_data.cpp
     src/nintendo_auth.cpp
     src/nxapi.cpp
     src/splatnet.cpp
@@ -187,27 +192,32 @@ if(WIN32)
     enable_language(RC)
     configure_file(
         "${CMAKE_SOURCE_DIR}/resources/windows/app.rc.in"
-        "${CMAKE_CURRENT_BINARY_DIR}/nso-album-sync.rc"
+        "${CMAKE_CURRENT_BINARY_DIR}/CaptureDock.rc"
         @ONLY
     )
 
-    # Keep the Windows release as one .exe. The Discord runtime and required
-    # third-party notices are both embedded as RCDATA resources. The runtime is
-    # extracted only when Rich Presence is first used.
-    file(TO_CMAKE_PATH "${NSO_DISCORD_SDK_RUNTIME}" NSO_DISCORD_SDK_RUNTIME_RC)
+    # Keep the Windows release as one .exe. Embed the notices and, for builds
+    # with Discord, the runtime that is extracted on first use.
     file(TO_CMAKE_PATH "${NSO_THIRD_PARTY_NOTICES}" NSO_THIRD_PARTY_NOTICES_RC)
-    set(NSO_DISCORD_SDK_RC "${CMAKE_CURRENT_BINARY_DIR}/discord-social-sdk.rc")
-    file(WRITE "${NSO_DISCORD_SDK_RC}"
-        "${NSO_DISCORD_SDK_RESOURCE_ID} RCDATA \"${NSO_DISCORD_SDK_RUNTIME_RC}\"\n"
+    set(NSO_EMBEDDED_RESOURCES_RC "${CMAKE_CURRENT_BINARY_DIR}/embedded-resources.rc")
+    file(WRITE "${NSO_EMBEDDED_RESOURCES_RC}"
         "${NSO_THIRD_PARTY_NOTICES_RESOURCE_ID} RCDATA \"${NSO_THIRD_PARTY_NOTICES_RC}\"\n")
+    if(NSO_ENABLE_DISCORD)
+        file(TO_CMAKE_PATH "${NSO_DISCORD_SDK_RUNTIME}" NSO_DISCORD_SDK_RUNTIME_RC)
+        file(APPEND "${NSO_EMBEDDED_RESOURCES_RC}"
+            "${NSO_DISCORD_SDK_RESOURCE_ID} RCDATA \"${NSO_DISCORD_SDK_RUNTIME_RC}\"\n")
+    endif()
 
     list(APPEND NSO_SOURCES
         src/auth_callback_windows.cpp
+        src/dashboard_windows.cpp
+        src/library_windows.cpp
+        src/import_windows.cpp
         src/http_windows.cpp
         src/platform_windows.cpp
         src/secure_store_windows.cpp
-        "${CMAKE_CURRENT_BINARY_DIR}/nso-album-sync.rc"
-        "${NSO_DISCORD_SDK_RC}"
+        "${CMAKE_CURRENT_BINARY_DIR}/CaptureDock.rc"
+        "${NSO_EMBEDDED_RESOURCES_RC}"
     )
 elseif(APPLE)
     enable_language(OBJCXX)
@@ -235,47 +245,51 @@ else()
 endif()
 
 if(WIN32)
-    add_executable(nso-album-sync WIN32 ${NSO_SOURCES} ${NSO_HEADERS})
+    add_executable(CaptureDock WIN32 ${NSO_SOURCES} ${NSO_HEADERS})
 elseif(APPLE)
-    add_executable(nso-album-sync MACOSX_BUNDLE ${NSO_SOURCES} ${NSO_HEADERS})
+    add_executable(CaptureDock MACOSX_BUNDLE ${NSO_SOURCES} ${NSO_HEADERS})
     set_target_properties(
-        nso-album-sync
+        CaptureDock
         PROPERTIES
-            MACOSX_BUNDLE_BUNDLE_NAME "NSO Album Sync"
-            MACOSX_BUNDLE_GUI_IDENTIFIER "org.dycool.nso-album-sync"
+            MACOSX_BUNDLE_BUNDLE_NAME "CaptureDock"
+            MACOSX_BUNDLE_GUI_IDENTIFIER "io.github.minimalhandle.capturedock"
             MACOSX_BUNDLE_ICON_FILE "app.icns"
             MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/Info.plist.in"
             BUILD_RPATH "@executable_path/../Frameworks"
             INSTALL_RPATH "@executable_path/../Frameworks"
     )
 else()
-    add_executable(nso-album-sync ${NSO_SOURCES} ${NSO_HEADERS})
+    add_executable(CaptureDock ${NSO_SOURCES} ${NSO_HEADERS})
     set_target_properties(
-        nso-album-sync
+        CaptureDock
         PROPERTIES
+            OUTPUT_NAME "capturedock"
             BUILD_RPATH "$ORIGIN;$ORIGIN/../lib"
             INSTALL_RPATH "$ORIGIN;$ORIGIN/../lib"
     )
 endif()
 
-target_include_directories(
-    nso-album-sync
-    PRIVATE
-        "${CMAKE_SOURCE_DIR}/include"
-        "${NSO_DISCORD_SDK_INCLUDE_DIR}"
-)
+target_include_directories(CaptureDock PRIVATE "${CMAKE_SOURCE_DIR}/include")
 target_compile_definitions(
-    nso-album-sync
+    CaptureDock
     PRIVATE
-        NSO_DISCORD_SOCIAL_SDK_VERSION="${NSO_DISCORD_SOCIAL_SDK_VERSION}"
-        NSO_DISCORD_SDK_RESOURCE_ID=${NSO_DISCORD_SDK_RESOURCE_ID}
+        NSO_APP_VERSION="${PROJECT_VERSION}"
+        NSO_ENABLE_DISCORD=$<BOOL:${NSO_ENABLE_DISCORD}>
         NSO_THIRD_PARTY_NOTICES_RESOURCE_ID=${NSO_THIRD_PARTY_NOTICES_RESOURCE_ID}
 )
-target_link_libraries(nso-album-sync PRIVATE "${NSO_DISCORD_SDK_LINK_LIBRARY}")
-
-if(MSVC)
-    target_link_options(nso-album-sync PRIVATE /DELAYLOAD:discord_partner_sdk.dll)
-    target_link_libraries(nso-album-sync PRIVATE delayimp)
+if(NSO_ENABLE_DISCORD)
+    target_include_directories(CaptureDock PRIVATE "${NSO_DISCORD_SDK_INCLUDE_DIR}")
+    target_compile_definitions(
+        CaptureDock
+        PRIVATE
+            NSO_DISCORD_SOCIAL_SDK_VERSION="${NSO_DISCORD_SOCIAL_SDK_VERSION}"
+            NSO_DISCORD_SDK_RESOURCE_ID=${NSO_DISCORD_SDK_RESOURCE_ID}
+    )
+    target_link_libraries(CaptureDock PRIVATE "${NSO_DISCORD_SDK_LINK_LIBRARY}")
+    if(MSVC)
+        target_link_options(CaptureDock PRIVATE /DELAYLOAD:discord_partner_sdk.dll)
+        target_link_libraries(CaptureDock PRIVATE delayimp)
+    endif()
 endif()
 
 include(CheckIPOSupported)
@@ -287,42 +301,42 @@ if(NSO_IPO_SUPPORTED)
         # -flto=auto keeps the same LTO optimization while allowing GCC to use
         # the jobserver when available or auto-detect the host CPU count.
         target_compile_options(
-            nso-album-sync
+            CaptureDock
             PRIVATE
                 $<$<CONFIG:Release>:-flto=auto>
                 $<$<CONFIG:Release>:-fno-fat-lto-objects>
         )
         target_link_options(
-            nso-album-sync
+            CaptureDock
             PRIVATE $<$<CONFIG:Release>:-flto=auto>
         )
     else()
-        set_property(TARGET nso-album-sync PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        set_property(TARGET CaptureDock PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
 else()
     message(STATUS "IPO/LTO disabled: ${NSO_IPO_ERROR}")
 endif()
 
 if(NOT WIN32)
-    target_link_libraries(nso-album-sync PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+    target_link_libraries(CaptureDock PRIVATE OpenSSL::SSL OpenSSL::Crypto)
 endif()
 
 if(NSO_STATIC_RUNTIME AND UNIX AND NOT APPLE)
-    target_link_options(nso-album-sync PRIVATE -static-libgcc -static-libstdc++)
+    target_link_options(CaptureDock PRIVATE -static-libgcc -static-libstdc++)
     find_library(
         NSO_ZSTD_STATIC
         NAMES libzstd.a zstd.a
         PATHS /usr/lib /usr/lib/x86_64-linux-gnu /usr/local/lib
     )
     if(NSO_ZSTD_STATIC)
-        target_link_libraries(nso-album-sync PRIVATE ${NSO_ZSTD_STATIC})
+        target_link_libraries(CaptureDock PRIVATE ${NSO_ZSTD_STATIC})
     endif()
 endif()
 
 if(WIN32)
     target_link_libraries(
-        nso-album-sync
-        PRIVATE advapi32 bcrypt crypt32 winhttp shell32 ole32 comdlg32
+        CaptureDock
+        PRIVATE advapi32 bcrypt crypt32 winhttp shell32 ole32 comdlg32 comctl32 gdi32 uuid gdiplus mfplat mfplay mfuuid
     )
 elseif(APPLE)
     find_library(NSO_COCOA_FRAMEWORK Cocoa REQUIRED)
@@ -331,7 +345,7 @@ elseif(APPLE)
     find_library(NSO_USER_NOTIFICATIONS_FRAMEWORK UserNotifications REQUIRED)
 
     target_link_libraries(
-        nso-album-sync
+        CaptureDock
         PRIVATE
             ${NSO_COCOA_FRAMEWORK}
             ${NSO_CORE_SERVICES_FRAMEWORK}
@@ -340,16 +354,17 @@ elseif(APPLE)
     )
 
     find_program(NSO_CODESIGN_EXECUTABLE codesign REQUIRED)
-    find_program(NSO_DITTO_EXECUTABLE ditto REQUIRED)
-    if(NSO_DISCORD_SDK_IS_FRAMEWORK)
-        set(NSO_BUNDLED_DISCORD_FRAMEWORK
-            "$<TARGET_BUNDLE_DIR:nso-album-sync>/Contents/Frameworks/discord_partner_sdk.framework")
+    set(NSO_BUNDLED_FRAMEWORKS "$<TARGET_BUNDLE_DIR:CaptureDock>/Contents/Frameworks")
+    set(NSO_BUNDLED_DISCORD_FRAMEWORK "${NSO_BUNDLED_FRAMEWORKS}/discord_partner_sdk.framework")
+    set(NSO_BUNDLED_DISCORD_DYLIB "${NSO_BUNDLED_FRAMEWORKS}/libdiscord_partner_sdk.dylib")
+    if(NSO_ENABLE_DISCORD AND NSO_DISCORD_SDK_IS_FRAMEWORK)
+        find_program(NSO_DITTO_EXECUTABLE ditto REQUIRED)
         add_custom_command(
-            TARGET nso-album-sync
+            TARGET CaptureDock
             POST_BUILD
             COMMAND
                 "${CMAKE_COMMAND}" -E make_directory
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>/Contents/Frameworks"
+                "${NSO_BUNDLED_FRAMEWORKS}"
             COMMAND
                 "${CMAKE_COMMAND}" -E rm -rf
                 "${NSO_BUNDLED_DISCORD_FRAMEWORK}"
@@ -375,97 +390,106 @@ elseif(APPLE)
                 "Versions/Current/Resources" "${NSO_BUNDLED_DISCORD_FRAMEWORK}/Resources"
             COMMAND "${CMAKE_COMMAND}" -E create_symlink
                 "Versions/Current/discord_partner_sdk" "${NSO_BUNDLED_DISCORD_FRAMEWORK}/discord_partner_sdk"
-            COMMAND
-                "${NSO_CODESIGN_EXECUTABLE}"
-                --force
-                --deep
-                --sign "${NSO_MACOS_CODESIGN_IDENTITY}"
-                --timestamp=none
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>"
-            COMMAND
-                "${NSO_CODESIGN_EXECUTABLE}"
-                --verify
-                --deep
-                --strict
-                --verbose=2
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>"
-            COMMENT "Bundling Discord Social SDK framework, notices, and locally code-signing NSO Album Sync.app"
+            COMMENT "Bundling Discord Social SDK framework"
             VERBATIM
         )
-    else()
+    elseif(NSO_ENABLE_DISCORD)
         add_custom_command(
-            TARGET nso-album-sync
+            TARGET CaptureDock
             POST_BUILD
             COMMAND
                 "${CMAKE_COMMAND}" -E make_directory
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>/Contents/Frameworks"
+                "${NSO_BUNDLED_FRAMEWORKS}"
             COMMAND
                 "${CMAKE_COMMAND}" -E copy_if_different
                 "${NSO_DISCORD_SDK_RUNTIME}"
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>/Contents/Frameworks/libdiscord_partner_sdk.dylib"
-            COMMAND
-                "${NSO_CODESIGN_EXECUTABLE}"
-                --force
-                --deep
-                --sign "${NSO_MACOS_CODESIGN_IDENTITY}"
-                --timestamp=none
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>"
-            COMMAND
-                "${NSO_CODESIGN_EXECUTABLE}"
-                --verify
-                --deep
-                --strict
-                --verbose=2
-                "$<TARGET_BUNDLE_DIR:nso-album-sync>"
-            COMMENT "Bundling Discord Social SDK, notices, and locally code-signing NSO Album Sync.app"
+                "${NSO_BUNDLED_DISCORD_DYLIB}"
+            COMMENT "Bundling Discord Social SDK runtime"
+            VERBATIM
+        )
+    else()
+        # A build directory can be reconfigured after previously including the SDK.
+        add_custom_command(
+            TARGET CaptureDock
+            POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E rm -rf "${NSO_BUNDLED_DISCORD_FRAMEWORK}"
+            COMMAND "${CMAKE_COMMAND}" -E rm -f "${NSO_BUNDLED_DISCORD_DYLIB}"
             VERBATIM
         )
     endif()
+    add_custom_command(
+        TARGET CaptureDock
+        POST_BUILD
+        COMMAND
+            "${NSO_CODESIGN_EXECUTABLE}"
+            --force --deep --sign "${NSO_MACOS_CODESIGN_IDENTITY}" --timestamp=none
+            "$<TARGET_BUNDLE_DIR:CaptureDock>"
+        COMMAND
+            "${NSO_CODESIGN_EXECUTABLE}" --verify --deep --strict --verbose=2
+            "$<TARGET_BUNDLE_DIR:CaptureDock>"
+        COMMENT "Code-signing CaptureDock.app"
+        VERBATIM
+    )
 else()
     if(PkgConfig_FOUND)
         pkg_check_modules(LIBSECRET QUIET libsecret-1)
         if(LIBSECRET_FOUND)
-            target_compile_definitions(nso-album-sync PRIVATE NSO_HAVE_LIBSECRET=1)
-            target_include_directories(nso-album-sync PRIVATE ${LIBSECRET_INCLUDE_DIRS})
-            target_link_libraries(nso-album-sync PRIVATE ${LIBSECRET_LIBRARIES})
+            target_compile_definitions(CaptureDock PRIVATE NSO_HAVE_LIBSECRET=1)
+            target_include_directories(CaptureDock PRIVATE ${LIBSECRET_INCLUDE_DIRS})
+            target_link_libraries(CaptureDock PRIVATE ${LIBSECRET_LIBRARIES})
         endif()
 
         if(NSO_ENABLE_LINUX_TRAY)
             pkg_check_modules(GTK3 QUIET gtk+-3.0)
             pkg_check_modules(APPIND QUIET ayatana-appindicator3-0.1)
             if(GTK3_FOUND)
-                target_compile_definitions(nso-album-sync PRIVATE NSO_HAVE_GTK=1)
-                target_include_directories(nso-album-sync PRIVATE ${GTK3_INCLUDE_DIRS})
-                target_link_libraries(nso-album-sync PRIVATE ${GTK3_LIBRARIES})
+                target_compile_definitions(CaptureDock PRIVATE NSO_HAVE_GTK=1)
+                target_include_directories(CaptureDock PRIVATE ${GTK3_INCLUDE_DIRS})
+                target_link_libraries(CaptureDock PRIVATE ${GTK3_LIBRARIES})
                 if(APPIND_FOUND)
-                    target_compile_definitions(nso-album-sync PRIVATE NSO_HAVE_APPINDICATOR=1)
-                    target_include_directories(nso-album-sync PRIVATE ${APPIND_INCLUDE_DIRS})
-                    target_link_libraries(nso-album-sync PRIVATE ${APPIND_LIBRARIES})
+                    target_compile_definitions(CaptureDock PRIVATE NSO_HAVE_APPINDICATOR=1)
+                    target_include_directories(CaptureDock PRIVATE ${APPIND_INCLUDE_DIRS})
+                    target_link_libraries(CaptureDock PRIVATE ${APPIND_LIBRARIES})
                 endif()
             endif()
         endif()
     endif()
 
-    add_custom_command(
-        TARGET nso-album-sync
-        POST_BUILD
-        COMMAND
-            "${CMAKE_COMMAND}" -E copy_if_different
-            "${NSO_DISCORD_SDK_RUNTIME}"
-            "$<TARGET_FILE_DIR:nso-album-sync>/libdiscord_partner_sdk.so"
-        COMMENT "Bundling Discord Social SDK runtime"
-        VERBATIM
-    )
+    if(NSO_ENABLE_DISCORD)
+        add_custom_command(
+            TARGET CaptureDock
+            POST_BUILD
+            COMMAND
+                "${CMAKE_COMMAND}" -E copy_if_different
+                "${NSO_DISCORD_SDK_RUNTIME}"
+                "$<TARGET_FILE_DIR:CaptureDock>/libdiscord_partner_sdk.so"
+            COMMENT "Bundling Discord Social SDK runtime"
+            VERBATIM
+        )
+    else()
+        add_custom_command(
+            TARGET CaptureDock
+            POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E rm -f
+                "$<TARGET_FILE_DIR:CaptureDock>/libdiscord_partner_sdk.so"
+            VERBATIM
+        )
+    endif()
 endif()
 
 install(
-    TARGETS nso-album-sync
+    TARGETS CaptureDock
     RUNTIME DESTINATION bin
     BUNDLE DESTINATION .
 )
 if(NOT WIN32 AND NOT APPLE)
     install(
         FILES "${NSO_THIRD_PARTY_NOTICES}"
-        DESTINATION share/doc/nso-album-sync
+        DESTINATION share/doc/capturedock
+    )
+    install(
+        FILES "${CMAKE_SOURCE_DIR}/icon.svg"
+        DESTINATION share/icons/hicolor/scalable/apps
+        RENAME capturedock.svg
     )
 endif()

@@ -16,7 +16,7 @@
 namespace nso {
 namespace {
 
-constexpr char kDesktopId[] = "nso-album-sync-auth.desktop";
+constexpr char kDesktopId[] = "capturedock-auth.desktop";
 constexpr char kMimeType[] = "x-scheme-handler/npf71b963c1b7b6d119";
 
 std::filesystem::path desktop_file() {
@@ -102,7 +102,7 @@ bool register_nintendo_auth_protocol() {
         output
             << "[Desktop Entry]\n"
             << "Type=Application\n"
-            << "Name=NSO Album Sync Nintendo Account Sign-In\n"
+            << "Name=CaptureDock Nintendo Account Sign-In\n"
             << "Exec=" << desktop_quote(executable) << " %u\n"
             << "NoDisplay=true\n"
             << "Terminal=false\n"

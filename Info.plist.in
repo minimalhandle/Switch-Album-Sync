@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>CFBundleExecutable</key><string>nso-album-sync</string>
-<key>CFBundleIdentifier</key><string>org.dycool.nso-album-sync</string>
-<key>CFBundleName</key><string>NSO Album Sync</string>
-<key>CFBundleDisplayName</key><string>NSO Album Sync</string>
+<key>CFBundleExecutable</key><string>CaptureDock</string>
+<key>CFBundleIdentifier</key><string>io.github.minimalhandle.capturedock</string>
+<key>CFBundleName</key><string>CaptureDock</string>
+<key>CFBundleDisplayName</key><string>CaptureDock</string>
 <key>CFBundleIconFile</key><string>app</string>
 <key>CFBundleIconName</key><string>app</string>
 <key>CFBundlePackageType</key><string>APPL</string>

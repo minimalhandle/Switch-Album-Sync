@@ -39,7 +39,7 @@ std::wstring utf8_to_wide(const std::string& text) {
 }
 
 std::wstring credential_target(const std::string& account) {
-    return L"Dycool.NSOAlbumSync/" + utf8_to_wide(account);
+    return L"CaptureDock/" + utf8_to_wide(account);
 }
 
 }  // namespace

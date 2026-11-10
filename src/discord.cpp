@@ -1,4 +1,6 @@
 #include "nso_album_sync/discord.hpp"
+
+#if NSO_ENABLE_DISCORD
 #include "nso_album_sync/util.hpp"
 #include "nso_album_sync/rpc.hpp"
 #include "nso_album_sync/zeldanotes.hpp"
@@ -59,7 +61,7 @@ bool ensure_embedded_discord_sdk_loaded() {
         std::error_code error;
         auto directory = std::filesystem::temp_directory_path(error);
         if (error) return false;
-        directory /= "NSOAlbumSync";
+        directory /= "CaptureDock";
         directory /= "discord-social-sdk-" NSO_DISCORD_SOCIAL_SDK_VERSION;
         std::filesystem::create_directories(directory, error);
         if (error) return false;
@@ -124,14 +126,7 @@ bool is_splatoon2_presence(const NintendoPresence& presence) {
 }
 
 bool is_zelda_notes_presence(const NintendoPresence& presence) {
-    if (zelda_notes_game_for_title_id(presence.title_id) != ZeldaNotesGame::Unknown) {
-        return true;
-    }
-    const auto& name = presence.game_name;
-    return name.find("Breath of the Wild") != std::string::npos ||
-        name.find("ブレス オブ ザ ワイルド") != std::string::npos ||
-        name.find("Tears of the Kingdom") != std::string::npos ||
-        name.find("ティアーズ オブ ザ キングダム") != std::string::npos;
+    return zelda_notes_game_for_presence(presence.title_id, presence.game_name) != ZeldaNotesGame::Unknown;
 }
 
 NintendoPresence with_live_zelda_location(
@@ -541,3 +536,20 @@ void DiscordPresence::update(const NintendoPresence& presence) {
 }
 
 }  // namespace nso
+
+#else
+
+namespace nso {
+
+DiscordPresence::DiscordPresence(std::uint64_t) {}
+DiscordPresence::~DiscordPresence() = default;
+
+bool DiscordPresence::available() const { return false; }
+bool DiscordPresence::self_test_runtime() { return false; }
+void DiscordPresence::update(const NintendoPresence&) {}
+void DiscordPresence::clear() {}
+void DiscordPresence::set_rpc_settings(const RpcSettings&) {}
+
+}  // namespace nso
+
+#endif

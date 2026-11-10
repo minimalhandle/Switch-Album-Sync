@@ -54,7 +54,7 @@ std::filesystem::path autostart_file() {
     return std::filesystem::path(home) /
            ".config" /
            "autostart" /
-           "nso-album-sync.desktop";
+           "capturedock.desktop";
 }
 
 std::string executable_path() {
@@ -70,7 +70,7 @@ std::string executable_path() {
         return buffer.data();
     }
 
-    return "nso-album-sync";
+    return "capturedock";
 }
 
 std::string desktop_escape(std::string value) {
@@ -88,7 +88,7 @@ std::string desktop_escape(std::string value) {
 
 #ifdef NSO_HAVE_GTK
 
-void install_nso_css() {
+void install_capturedock_css() {
     static bool installed = false;
     if (installed) {
         return;
@@ -96,14 +96,13 @@ void install_nso_css() {
     installed = true;
 
     static constexpr char kCss[] =
-        ".nso-title { color: #e60012; font-weight: 700; font-size: 16px; }"
-        ".nso-subtle { color: @theme_fg_color; }"
-        ".nso-dialog { background-color: @theme_bg_color; color: @theme_fg_color; }"
-        ".nso-dialog button.suggested-action {"
-        "  background-image: none; background-color: #e60012; color: white;"
+        ".capturedock-title { color: @theme_fg_color; font-weight: 700; font-size: 16px; }"
+        ".capturedock-dialog { background-color: @theme_bg_color; color: @theme_fg_color; }"
+        ".capturedock-dialog button.suggested-action {"
+        "  background-image: none; background-color: #08786e; color: white;"
         "  border-radius: 4px; min-height: 30px; min-width: 92px;"
         "}"
-        ".nso-dialog entry { min-height: 30px; }";
+        ".capturedock-dialog entry { min-height: 30px; }";
 
     auto* provider = gtk_css_provider_new();
     GError* error = nullptr;
@@ -233,6 +232,10 @@ void rebuild_menu(PlatformUi::Impl* impl) {
         "Sync Now",
         &impl->callbacks.sync_now,
         state.signed_in && !state.sync_busy);
+    if (state.retry_available) {
+        append_menu_item(impl->menu, "Retry Failed Captures", &impl->callbacks.retry_failed,
+            state.signed_in && !state.sync_busy);
+    }
     append_check_item(
         impl->menu,
         auto_sync_label(state.sync_interval_minutes),
@@ -246,23 +249,25 @@ void rebuild_menu(PlatformUi::Impl* impl) {
     append_separator(impl->menu);
     append_check_item(impl->menu, "Notifications", state.notifications,
         &impl->callbacks.toggle_notifications);
-    auto* rpc = gtk_menu_new();
-    auto* rpc_item = append_menu_item(impl->menu, "Discord Rich Presence", nullptr);
-    gtk_menu_item_set_submenu(GTK_MENU_ITEM(rpc_item), rpc);
-    append_check_item(rpc, "Enabled", state.discord, &impl->callbacks.toggle_discord);
-    append_separator(rpc);
-    append_check_item(rpc, "Show Switch username",
-        state.rpc.show_profile_picture && state.rpc.show_username,
-        &impl->callbacks.toggle_rpc_username, state.rpc.show_profile_picture);
-    append_check_item(rpc, "Show profile picture", state.rpc.show_profile_picture, &impl->callbacks.toggle_rpc_profile_picture);
-    append_check_item(rpc, "Show total play time", state.rpc.show_play_time, &impl->callbacks.toggle_rpc_play_time);
-    append_separator(rpc);
-    append_check_item(rpc, "Zelda Notes live location", state.rpc.zelda, &impl->callbacks.toggle_rpc_zelda);
-    append_check_item(rpc, "Animal Crossing details", state.rpc.animal_crossing, &impl->callbacks.toggle_rpc_animal_crossing);
-    append_check_item(rpc, "Splatoon 3 details", state.rpc.splatoon3, &impl->callbacks.toggle_rpc_splatoon3);
-    append_check_item(rpc, "Splatoon 2 details", state.rpc.splatoon2, &impl->callbacks.toggle_rpc_splatoon2);
-    append_separator(rpc);
-    append_menu_item(rpc, "Refresh Now", &impl->callbacks.refresh_rpc, state.discord && state.signed_in);
+    if (state.discord_available) {
+        auto* rpc = gtk_menu_new();
+        auto* rpc_item = append_menu_item(impl->menu, "Discord Rich Presence", nullptr);
+        gtk_menu_item_set_submenu(GTK_MENU_ITEM(rpc_item), rpc);
+        append_check_item(rpc, "Enabled", state.discord, &impl->callbacks.toggle_discord);
+        append_separator(rpc);
+        append_check_item(rpc, "Show Switch username",
+            state.rpc.show_profile_picture && state.rpc.show_username,
+            &impl->callbacks.toggle_rpc_username, state.rpc.show_profile_picture);
+        append_check_item(rpc, "Show profile picture", state.rpc.show_profile_picture, &impl->callbacks.toggle_rpc_profile_picture);
+        append_check_item(rpc, "Show total play time", state.rpc.show_play_time, &impl->callbacks.toggle_rpc_play_time);
+        append_separator(rpc);
+        append_check_item(rpc, "Zelda Notes live location", state.rpc.zelda, &impl->callbacks.toggle_rpc_zelda);
+        append_check_item(rpc, "Animal Crossing details", state.rpc.animal_crossing, &impl->callbacks.toggle_rpc_animal_crossing);
+        append_check_item(rpc, "Splatoon 3 details", state.rpc.splatoon3, &impl->callbacks.toggle_rpc_splatoon3);
+        append_check_item(rpc, "Splatoon 2 details", state.rpc.splatoon2, &impl->callbacks.toggle_rpc_splatoon2);
+        append_separator(rpc);
+        append_menu_item(rpc, "Refresh Now", &impl->callbacks.refresh_rpc, state.discord && state.signed_in);
+    }
 
     append_separator(impl->menu);
     append_menu_item(
@@ -281,10 +286,19 @@ void rebuild_menu(PlatformUi::Impl* impl) {
         state.start_on_boot,
         &impl->callbacks.toggle_start);
     append_menu_item(impl->menu, "HTTP Proxy…", &impl->callbacks.proxy);
-    append_menu_item(
-        impl->menu,
-        state.signed_in ? "Sign Out" : "Sign In to Nintendo Account…",
-        &impl->callbacks.sign_in_out);
+    if (state.sign_in_pending) {
+        if (state.manual_sign_in) {
+            append_menu_item(impl->menu, "Paste Sign-In Link…", &impl->callbacks.paste_sign_in_link);
+        }
+        append_menu_item(impl->menu, "Cancel Sign-In", &impl->callbacks.cancel_sign_in);
+    } else {
+        append_menu_item(impl->menu, state.signed_in ? "Sign Out" : "Sign In to Nintendo Account…",
+            &impl->callbacks.sign_in_out);
+    }
+    if (state.legacy_credential) {
+        append_menu_item(impl->menu, "Clear Legacy Credential…",
+            &impl->callbacks.clear_legacy_credential, !state.sign_in_pending);
+    }
 
     append_separator(impl->menu);
     append_menu_item(impl->menu, "Exit", &impl->callbacks.exit);
@@ -316,17 +330,17 @@ GtkWidget* create_dialog(
     gtk_dialog_set_default_response(GTK_DIALOG(dialog), GTK_RESPONSE_OK);
     gtk_style_context_add_class(
         gtk_widget_get_style_context(dialog),
-        "nso-dialog");
+        "capturedock-dialog");
 
     auto* content = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
     gtk_container_set_border_width(GTK_CONTAINER(content), 20);
     gtk_box_set_spacing(GTK_BOX(content), 10);
 
-    auto* brand = gtk_label_new("NSO Album Sync");
+    auto* brand = gtk_label_new("CaptureDock");
     gtk_label_set_xalign(GTK_LABEL(brand), 0.0f);
     gtk_style_context_add_class(
         gtk_widget_get_style_context(brand),
-        "nso-title");
+        "capturedock-title");
     gtk_box_pack_start(GTK_BOX(content), brand, FALSE, FALSE, 0);
 
     auto* label = gtk_label_new(message.c_str());
@@ -370,8 +384,8 @@ std::string indicator_icon_path() {
         appdir != nullptr && *appdir != '\0') {
         const std::filesystem::path root(appdir);
         const std::array candidates{
-            root / "nso-album-sync.svg",
-            root / "usr/share/icons/hicolor/scalable/apps/nso-album-sync.svg",
+            root / "capturedock.svg",
+            root / "usr/share/icons/hicolor/scalable/apps/capturedock.svg",
         };
         for (const auto& candidate : candidates) {
             if (std::filesystem::exists(candidate)) {
@@ -383,6 +397,10 @@ std::string indicator_icon_path() {
     const auto local = std::filesystem::absolute("icon.svg");
     if (std::filesystem::exists(local)) {
         return local.string();
+    }
+    auto* theme = gtk_icon_theme_get_default();
+    if (theme && gtk_icon_theme_has_icon(theme, "capturedock")) {
+        return "capturedock";
     }
     return "applications-games";
 }
@@ -403,23 +421,25 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
 #ifdef NSO_HAVE_GTK
     int argc = 0;
     char** argv = nullptr;
+    g_set_prgname("capturedock");
+    g_set_application_name("CaptureDock");
     gtk_init(&argc, &argv);
-    install_nso_css();
+    install_capturedock_css();
 
     impl_->menu = gtk_menu_new();
     rebuild_menu(impl_);
 
 #ifdef NSO_HAVE_APPINDICATOR
     impl_->indicator = app_indicator_new(
-        "nso-album-sync",
+        "capturedock",
         "applications-games",
         APP_INDICATOR_CATEGORY_APPLICATION_STATUS);
     const auto icon = indicator_icon_path();
     app_indicator_set_icon_full(
         impl_->indicator,
         icon.c_str(),
-        "NSO Album Sync");
-    app_indicator_set_title(impl_->indicator, "NSO Album Sync");
+        "CaptureDock");
+    app_indicator_set_title(impl_->indicator, "CaptureDock");
     app_indicator_set_status(
         impl_->indicator,
         APP_INDICATOR_STATUS_ACTIVE);
@@ -438,7 +458,7 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
     gtk_main();
 #else
     std::cout
-        << "NSO Album Sync running. This build has no GTK/AppIndicator; "
+        << "CaptureDock running. This build has no GTK/AppIndicator; "
            "use Ctrl+C to stop.\n";
 
     if (impl_->callbacks.ready) {
@@ -492,7 +512,7 @@ void PlatformUi::notify(
 #ifdef NSO_HAVE_GTK
     char* arguments[] = {
         const_cast<char*>("notify-send"),
-        const_cast<char*>("--app-name=NSO Album Sync"),
+        const_cast<char*>("--app-name=CaptureDock"),
         const_cast<char*>("--icon=applications-games"),
         const_cast<char*>(title.c_str()),
         const_cast<char*>(message.c_str()),
@@ -691,10 +711,10 @@ void set_start_on_boot(bool enabled) {
     output
         << "[Desktop Entry]\n"
         << "Type=Application\n"
-        << "Name=NSO Album Sync\n"
+        << "Name=CaptureDock\n"
         << "Comment=Sync Nintendo Switch Online album captures\n"
         << "Exec=\"" << executable << "\"\n"
-        << "Icon=applications-games\n"
+        << "Icon=capturedock\n"
         << "Terminal=false\n"
         << "X-GNOME-Autostart-enabled=true\n";
 }

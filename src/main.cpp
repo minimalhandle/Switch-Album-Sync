@@ -21,6 +21,7 @@
 #include <cctype>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -33,7 +34,7 @@ public:
     SingleInstanceGuard() {
 #ifdef _WIN32
         handle_ = CreateMutexW(nullptr, FALSE,
-            L"Local\\NSOAlbumSync_SingleInstance_Mutex_f8bb0128");
+            L"Local\\CaptureDock_SingleInstance_Mutex");
         acquired_ = handle_ != nullptr && GetLastError() != ERROR_ALREADY_EXISTS;
 #else
         const auto directory = nso::application_runtime_directory();
@@ -98,42 +99,60 @@ int run_self_test() {
             return 2;
         }
 
-        nso::DiscordPresence discord(nso::kDiscordApplicationId);
-        if (!discord.self_test_runtime()) {
-            std::cerr << "Self-test failed: Discord Social SDK runtime did not load\n";
-            return 3;
+        if constexpr (nso::discord_available) {
+            nso::DiscordPresence discord(nso::kDiscordApplicationId);
+            if (!discord.self_test_runtime()) {
+                std::cerr << "Self-test failed: Discord Social SDK runtime did not load\n";
+                return 3;
+            }
+            discord.clear();
         }
-        discord.clear();
 
-        std::cout << "NSO Album Sync self-test passed\n";
+        std::cout << "CaptureDock self-test passed\n";
         return 0;
-    } catch (const std::exception& error) {
-        std::cerr << "Self-test failed: " << error.what() << '\n';
+    } catch (const std::exception&) {
+        std::cerr << "Self-test failed during initialization\n";
         return 4;
     }
 }
 
-int run_application(const std::string& auth_callback) {
+void log_debug_startup(const char* message) {
+    if (!nso::debug_logging_enabled()) return;
+    try {
+        std::ofstream log(std::filesystem::temp_directory_path() / "capturedock-rpc.log", std::ios::app);
+        if (log) log << "[CaptureDock] " << message << '\n';
+    } catch (const std::exception&) {
+    }
+}
+
+int run_application(const std::string& auth_callback, [[maybe_unused]] bool start_in_tray = false) {
+    log_debug_startup("Debug launch requested.");
     try {
         SingleInstanceGuard single_instance;
         if (!single_instance.acquired()) {
+            log_debug_startup("Another CaptureDock instance is running. Exit it from the tray before relaunching in debug mode.");
             if (!auth_callback.empty()) {
                 // Protocol callbacks launch a second copy of the executable.
                 // Forward that URL to the already-running tray process instead
                 // of treating the launch as an ordinary second app instance.
                 for (int attempt = 0; attempt < 5; ++attempt) {
                     if (nso::publish_nintendo_auth_callback(auth_callback)) {
+#ifdef _WIN32
+                        nso::show_running_dashboard();
+#endif
                         return 0;
                     }
                     std::this_thread::sleep_for(std::chrono::milliseconds(20));
                 }
             }
 #ifdef _WIN32
+            if (auth_callback.empty() && start_in_tray) return 0;
+            if (auth_callback.empty() && nso::show_running_dashboard()) return 0;
             MessageBoxW(nullptr,
-                L"NSO Album Sync is already running in the notification area.",
-                L"NSO Album Sync", MB_OK | MB_ICONINFORMATION);
+                L"CaptureDock is already running in the notification area.",
+                L"CaptureDock", MB_OK | MB_ICONINFORMATION);
 #else
-            std::cerr << "NSO Album Sync is already running.\n";
+            std::cerr << "CaptureDock is already running.\n";
 #endif
             return 0;
         }
@@ -142,10 +161,12 @@ int run_application(const std::string& auth_callback) {
             nso::publish_nintendo_auth_callback(auth_callback);
         }
 
+        log_debug_startup("Starting CaptureDock in debug mode.");
         nso::App app;
         return app.run();
-    } catch (const std::exception& error) {
-        std::cerr << "Fatal: " << error.what() << '\n';
+    } catch (const std::exception&) {
+        log_debug_startup("CaptureDock could not start.");
+        std::cerr << "Fatal: CaptureDock could not start\n";
         return 1;
     }
 }
@@ -241,7 +262,7 @@ int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
     nso::set_debug_logging_enabled(
         command_line_has_argument(L"--debug") || command_line_has_argument(L"-debug"));
     if (command_line_has_argument(L"--self-test")) return run_self_test();
-    return run_application(auth_callback_from_command_line());
+    return run_application(auth_callback_from_command_line(), command_line_has_argument(L"--start-in-tray"));
 }
 #else
 int main(int argc, char* argv[]) {

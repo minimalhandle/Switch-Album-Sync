@@ -17,7 +17,7 @@
 namespace nso {
 namespace {
 
-NSString* const kKeychainService = @"org.nsoalbumsync.session-token";
+NSString* const kKeychainService = @"org.capturedock.session-token";
 constexpr std::size_t kMaxLegacySecretBytes = 64 * 1024;
 
 NSDictionary* keychain_query(NSString* account) {
@@ -31,7 +31,7 @@ NSDictionary* keychain_query(NSString* account) {
 std::filesystem::path legacy_credentials_directory() {
     const char* home = std::getenv("HOME");
     return std::filesystem::path(home ? home : ".") /
-        "Library" / "Application Support" / "NSOAlbumSync" / "credentials";
+        "Library" / "Application Support" / "CaptureDock" / "credentials";
 }
 
 std::string safe_account_name(const std::string& account) {

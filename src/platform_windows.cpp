@@ -1,24 +1,38 @@
 #include "nso_album_sync/platform.hpp"
 
 #ifdef _WIN32
+#include "dashboard_windows.hpp"
+#include "import_windows.hpp"
+#include "library_windows.hpp"
 #include "nso_album_sync/windows_compat.hpp"
 #include <shellapi.h>
 #include <shobjidl.h>
 #include <algorithm>
+#include <atomic>
+#include <ctime>
+#include <deque>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace nso {
 namespace {
 constexpr UINT kTrayMessage = WM_APP + 42;
+constexpr UINT kStateChanged = WM_APP + 43;
+constexpr UINT kNotificationReady = WM_APP + 44;
+constexpr UINT_PTR kNotificationTimer = 1;
 constexpr int kIconId = 101;
+constexpr UINT kRecentCommand = 2000;
+constexpr std::size_t kRecentLimit = 8;
 constexpr int kDisclosureSourceButton = 1101;
-constexpr wchar_t kTrayClass[] = L"NSOAlbumSyncTray";
-constexpr wchar_t kPromptClass[] = L"NSOAlbumSyncPrompt";
-constexpr wchar_t kDisclosureClass[] = L"NSOAlbumSyncDisclosure";
+constexpr wchar_t kAppTitle[] = L"CaptureDock";
+constexpr wchar_t kTrayClass[] = L"CaptureDockTray";
+constexpr wchar_t kPromptClass[] = L"CaptureDockPrompt";
+constexpr wchar_t kDisclosureClass[] = L"CaptureDockDisclosure";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kRunValue[] = L"NSO Album Sync";
+constexpr wchar_t kRunValue[] = L"CaptureDock";
+constexpr wchar_t kStartInTray[] = L"--start-in-tray";
 constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
 constexpr char kNxapiSourceUrl[] =
     "https://github.com/samuelthomas2774/nxapi-znca-api";
@@ -30,6 +44,7 @@ enum Command : UINT {
     CmdRpcProfilePicture,
     CmdRpcPlayTime,
     CmdRpcZelda, CmdRpcAnimalCrossing, CmdRpcSplatoon3, CmdRpcSplatoon2, CmdRpcRefresh,
+    CmdDashboard, CmdRetry, CmdClearCredential, CmdPasteSignIn, CmdCancelSignIn, CmdImportCaptures,
 };
 
 std::wstring wide(const std::string& value) {
@@ -77,6 +92,28 @@ std::wstring auto_label(int minutes) {
     return L"Auto-Sync (Every " + std::to_wstring(std::max(1, minutes)) + L" min)";
 }
 
+bool start_in_tray_requested() {
+    int count = 0;
+    auto arguments = CommandLineToArgvW(GetCommandLineW(), &count);
+    if (!arguments) return false;
+    bool requested = false;
+    for (int i = 1; i < count; ++i) {
+        if (std::wstring_view(arguments[i]) == kStartInTray) {
+            requested = true;
+            break;
+        }
+    }
+    LocalFree(arguments);
+    return requested;
+}
+
+void write_startup_command(HKEY key, const std::wstring& quoted_executable) {
+    const std::wstring value = quoted_executable + L" " + kStartInTray;
+    RegSetValueExW(key, kRunValue, 0, REG_SZ,
+        reinterpret_cast<const BYTE*>(value.c_str()),
+        static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+}
+
 struct PromptState {
     HWND edit = nullptr;
     bool done = false;
@@ -86,6 +123,18 @@ struct PromptState {
 struct DisclosureState {
     bool done = false;
     bool accepted = false;
+};
+
+class ScaledDialog {
+public:
+    ScaledDialog() : previous_(SetThreadDpiAwarenessContext(
+        DPI_AWARENESS_CONTEXT_UNAWARE_GDISCALED)) {}
+    ~ScaledDialog() {
+        if (previous_) SetThreadDpiAwarenessContext(previous_);
+    }
+
+private:
+    DPI_AWARENESS_CONTEXT previous_;
 };
 
 LRESULT dialog_color(UINT msg, WPARAM wp) {
@@ -111,17 +160,20 @@ HWND centered_dialog(
     int client_width,
     int client_height,
     HINSTANCE instance,
-    void* state) {
+    void* state,
+    HWND owner) {
     constexpr DWORD style = WS_CAPTION | WS_SYSMENU;
     RECT rect{0, 0, client_width, client_height};
     AdjustWindowRectEx(&rect, style, FALSE, ex_style);
     const int width = rect.right - rect.left;
     const int height = rect.bottom - rect.top;
-    const int x = (GetSystemMetrics(SM_CXSCREEN) - width) / 2;
-    const int y = (GetSystemMetrics(SM_CYSCREEN) - height) / 2;
+    RECT area{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    if (owner) GetWindowRect(owner, &area);
+    const int x = area.left + (area.right - area.left - width) / 2;
+    const int y = area.top + (area.bottom - area.top - height) / 2;
     return CreateWindowExW(
         ex_style, class_name, title.c_str(), style,
-        x, y, width, height, nullptr, nullptr, instance, state);
+        x, y, width, height, owner, nullptr, instance, state);
 }
 
 HWND make_control(
@@ -249,7 +301,9 @@ LRESULT CALLBACK disclosure_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 std::string prompt_box(
     const std::string& title,
     const std::string& text,
-    const std::string& initial) {
+    const std::string& initial,
+    HWND owner) {
+    const ScaledDialog dpi;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
 
     WNDCLASSW wc{};
@@ -269,7 +323,8 @@ std::string prompt_box(
         540,
         150,
         instance,
-        &state);
+        &state,
+        owner);
     if (!window) return initial;
 
     make_control(
@@ -327,6 +382,7 @@ std::string prompt_box(
         28,
         IDCANCEL);
 
+    if (owner) EnableWindow(owner, FALSE);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
     if (state.edit != nullptr) {
@@ -335,7 +391,8 @@ std::string prompt_box(
     }
 
     MSG msg{};
-    while (!state.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL received = TRUE;
+    while (!state.done && (received = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         if (state.edit != nullptr &&
             msg.message == WM_KEYDOWN &&
             msg.hwnd == state.edit) {
@@ -354,6 +411,7 @@ std::string prompt_box(
             DispatchMessageW(&msg);
         }
     }
+    if (!received) PostQuitMessage(static_cast<int>(msg.wParam));
 
     std::string result = initial;
     if (state.accepted && state.edit != nullptr) {
@@ -363,11 +421,13 @@ std::string prompt_box(
         value.resize(static_cast<std::size_t>(n));
         result = utf8(value);
     }
+    if (owner) EnableWindow(owner, TRUE);
     DestroyWindow(window);
     return result;
 }
 
-bool disclosure_box(const std::string& title, const std::string& text) {
+bool disclosure_box(const std::string& title, const std::string& text, HWND owner) {
+    const ScaledDialog dpi;
     const HINSTANCE instance = GetModuleHandleW(nullptr);
 
     WNDCLASSW wc{};
@@ -402,7 +462,8 @@ bool disclosure_box(const std::string& title, const std::string& text) {
         client_width,
         client_height,
         instance,
-        &state);
+        &state,
+        owner);
     if (!window) return false;
 
     make_control(
@@ -455,38 +516,74 @@ bool disclosure_box(const std::string& title, const std::string& text) {
         button_height,
         IDCANCEL);
 
+    if (owner) EnableWindow(owner, FALSE);
     ShowWindow(window, SW_SHOW);
     SetForegroundWindow(window);
 
     MSG msg{};
-    while (!state.done && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+    BOOL received = TRUE;
+    while (!state.done && (received = GetMessageW(&msg, nullptr, 0, 0)) > 0) {
         if (!IsDialogMessageW(window, &msg)) {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
+    if (!received) PostQuitMessage(static_cast<int>(msg.wParam));
+    if (owner) EnableWindow(owner, TRUE);
     DestroyWindow(window);
     return state.accepted;
 }
 }  // namespace
 
 struct PlatformUi::Impl {
-    HWND window = nullptr;
+    std::atomic<HWND> window{nullptr};
     NOTIFYICONDATAW tray{};
     PlatformCallbacks callbacks;
     MenuState state;
     std::mutex mutex;
+    bool state_posted = false;
+    bool tray_available = false;
+    struct Notification {
+        std::string title, message;
+        std::vector<std::filesystem::path> captures;
+    };
+    std::deque<Notification> notifications;
+    bool balloon_active = false;
+    std::vector<std::filesystem::path> notification_captures;
+    WindowsDashboard dashboard;
 };
 
 namespace {
 PlatformUi::Impl* g_ui = nullptr;
 
+void show_next_notification(PlatformUi::Impl* ui, HWND window) {
+    std::lock_guard lock(ui->mutex);
+    if (ui->balloon_active || !ui->tray_available) return;
+    while (!ui->notifications.empty()) {
+        auto next = std::move(ui->notifications.front());
+        ui->notifications.pop_front();
+        auto balloon = ui->tray;
+        balloon.uFlags = NIF_INFO;
+        wcsncpy_s(balloon.szInfo, wide(next.message).c_str(), _TRUNCATE);
+        wcsncpy_s(balloon.szInfoTitle, wide(next.title).c_str(), _TRUNCATE);
+        balloon.dwInfoFlags = NIIF_INFO;
+        if (!Shell_NotifyIconW(NIM_MODIFY, &balloon)) continue;
+        ui->notification_captures = std::move(next.captures);
+        ui->balloon_active = true;
+        SetTimer(window, kNotificationTimer, 60000, nullptr);
+        break;
+    }
+}
+
 void invoke(PlatformUi::Impl* ui, UINT command) {
     if (!ui) return;
     const auto& c = ui->callbacks;
     switch (command) {
+        case CmdDashboard: ui->dashboard.show(); break;
+        case CmdImportCaptures: if (c.import_captures) c.import_captures(); break;
         case CmdSync: c.sync_now(); break;
-        case CmdCopy: c.copy_last_capture(); break;
+        case CmdRetry: if (c.retry_failed) c.retry_failed(); break;
+        case CmdCopy: ui->dashboard.copy_latest(); break;
         case CmdAuto: c.toggle_auto(); break;
         case CmdNotifications: c.toggle_notifications(); break;
         case CmdDiscord: c.toggle_discord(); break;
@@ -503,9 +600,23 @@ void invoke(PlatformUi::Impl* ui, UINT command) {
         case CmdStartup: c.toggle_start(); break;
         case CmdProxy: c.proxy(); break;
         case CmdAccount: c.sign_in_out(); break;
+        case CmdPasteSignIn: if (c.paste_sign_in_link) c.paste_sign_in_link(); break;
+        case CmdCancelSignIn: if (c.cancel_sign_in) c.cancel_sign_in(); break;
+        case CmdClearCredential: if (c.clear_legacy_credential) c.clear_legacy_credential(); break;
         case CmdExit: c.exit(); break;
         default: break;
     }
+}
+
+void update_dashboard(PlatformUi::Impl* ui) {
+    if (!ui) return;
+    MenuState state;
+    {
+        std::lock_guard lock(ui->mutex);
+        ui->state_posted = false;
+        state = ui->state;
+    }
+    ui->dashboard.update(state);
 }
 
 void tray_menu(PlatformUi::Impl* ui) {
@@ -518,41 +629,91 @@ void tray_menu(PlatformUi::Impl* ui) {
         AppendMenuW(menu, flags, id, label.c_str());
     };
 
+    add(CmdDashboard, L"Open Dashboard");
+    SetMenuDefaultItem(menu, CmdDashboard, FALSE);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(
         0,
         s.signed_in ? L"Connected as " + wide(s.nickname) : L"Not signed in",
         MF_GRAYED);
     add(0, L"Last sync: " + wide(s.last_sync), MF_GRAYED);
+    if (s.sync_busy) add(0, wide(s.status), MF_GRAYED);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(CmdSync, L"Sync Now", s.signed_in && !s.sync_busy ? MF_STRING : MF_GRAYED);
+    add(CmdImportCaptures, L"Import USB / SD…", s.sync_busy ? MF_GRAYED : MF_STRING);
+    if (s.retry_available) {
+        add(CmdRetry, L"Retry Failed Captures", s.signed_in && !s.sync_busy ? MF_STRING : MF_GRAYED);
+    }
     add(
         CmdAuto,
         auto_label(s.sync_interval_minutes),
         MF_STRING | (s.auto_sync ? MF_CHECKED : 0));
-    add(CmdCopy, L"Copy Last Capture", s.signed_in ? MF_STRING : MF_GRAYED);
+    add(CmdCopy, L"Copy Last Capture", s.recent_captures.empty() ? MF_GRAYED : MF_STRING);
+    const auto recent_count = std::min(kRecentLimit, s.recent_captures.size());
+    std::vector<HBITMAP> menu_thumbnails;
+    if (recent_count) {
+        const auto recent = CreatePopupMenu();
+        for (std::size_t i = 0; i < recent_count; ++i) {
+            const auto& path = s.recent_captures[i];
+            const bool video = _wcsicmp(path.extension().c_str(), L".mp4") == 0;
+            auto description = (path.parent_path() == s.destination ? L"Album" : path.parent_path().filename().wstring()) +
+                (video ? L"  ·  Video" : L"  ·  Screenshot");
+            if (s.capture_library && i < s.capture_library->size() && (*s.capture_library)[i].path == path) {
+                const auto modified = static_cast<std::time_t>((*s.capture_library)[i].modified);
+                std::tm local{};
+                wchar_t date[48]{};
+                if (localtime_s(&local, &modified) == 0 &&
+                    std::wcsftime(date, std::size(date), L"%d %b, %H:%M:%S", &local)) {
+                    description += L"  ·  ";
+                    description += date;
+                }
+            } else {
+                description += L"  ·  Recent #" + std::to_wstring(i + 1);
+            }
+            std::wstring label;
+            for (const auto ch : description) {
+                label.push_back(ch);
+                if (ch == L'&') label.push_back(ch);
+            }
+            label += L"  ·  Copy as file";
+            AppendMenuW(recent, MF_STRING, kRecentCommand + static_cast<UINT>(i), label.c_str());
+            if (const auto preview = ui->dashboard.recent_menu_thumbnail(path)) {
+                MENUITEMINFOW item{sizeof(item)};
+                item.fMask = MIIM_BITMAP;
+                item.hbmpItem = preview;
+                SetMenuItemInfoW(recent, static_cast<UINT>(i), TRUE, &item);
+                menu_thumbnails.push_back(preview);
+            }
+        }
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(recent), L"Recent captures");
+    } else {
+        add(0, L"Recent captures", MF_GRAYED);
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(CmdNotifications, L"Notifications",
         MF_STRING | (s.notifications ? MF_CHECKED : 0));
-    HMENU rpc = CreatePopupMenu();
-    const auto rpc_check = [&](UINT id, const wchar_t* label, bool checked, bool enabled = true) {
-        AppendMenuW(rpc, MF_STRING | (checked ? MF_CHECKED : 0) |
-            (enabled ? 0 : MF_GRAYED), id, label);
-    };
-    rpc_check(CmdDiscord, L"Enabled", s.discord);
-    AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
-    rpc_check(CmdRpcUsername, L"Show Switch username",
-        s.rpc.show_profile_picture && s.rpc.show_username, s.rpc.show_profile_picture);
-    rpc_check(CmdRpcProfilePicture, L"Show profile picture", s.rpc.show_profile_picture);
-    rpc_check(CmdRpcPlayTime, L"Show total play time", s.rpc.show_play_time);
-    AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
-    rpc_check(CmdRpcZelda, L"Zelda Notes live location", s.rpc.zelda);
-    rpc_check(CmdRpcAnimalCrossing, L"Animal Crossing details", s.rpc.animal_crossing);
-    rpc_check(CmdRpcSplatoon3, L"Splatoon 3 details", s.rpc.splatoon3);
-    rpc_check(CmdRpcSplatoon2, L"Splatoon 2 details", s.rpc.splatoon2);
-    AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(rpc, MF_STRING | (s.discord && s.signed_in ? 0 : MF_GRAYED),
-        CmdRpcRefresh, L"Refresh Now");
-    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(rpc), L"Discord Rich Presence");
+    if (s.discord_available) {
+        HMENU rpc = CreatePopupMenu();
+        const auto rpc_check = [&](UINT id, const wchar_t* label, bool checked, bool enabled = true) {
+            AppendMenuW(rpc, MF_STRING | (checked ? MF_CHECKED : 0) |
+                (enabled ? 0 : MF_GRAYED), id, label);
+        };
+        rpc_check(CmdDiscord, L"Enabled", s.discord);
+        AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
+        rpc_check(CmdRpcUsername, L"Show Switch username",
+            s.rpc.show_profile_picture && s.rpc.show_username, s.rpc.show_profile_picture);
+        rpc_check(CmdRpcProfilePicture, L"Show profile picture", s.rpc.show_profile_picture);
+        rpc_check(CmdRpcPlayTime, L"Show total play time", s.rpc.show_play_time);
+        AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
+        rpc_check(CmdRpcZelda, L"Zelda Notes live location", s.rpc.zelda);
+        rpc_check(CmdRpcAnimalCrossing, L"Animal Crossing details", s.rpc.animal_crossing);
+        rpc_check(CmdRpcSplatoon3, L"Splatoon 3 details", s.rpc.splatoon3);
+        rpc_check(CmdRpcSplatoon2, L"Splatoon 2 details", s.rpc.splatoon2);
+        AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(rpc, MF_STRING | (s.discord && s.signed_in ? 0 : MF_GRAYED),
+            CmdRpcRefresh, L"Refresh Now");
+        AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(rpc), L"Discord Rich Presence");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(CmdFolder, L"Choose Album Folder…");
     add(CmdOpen, L"Open Album Folder");
@@ -562,9 +723,13 @@ void tray_menu(PlatformUi::Impl* ui) {
         L"Start on Boot",
         MF_STRING | (s.start_on_boot ? MF_CHECKED : 0));
     add(CmdProxy, L"HTTP Proxy…");
-    add(
-        CmdAccount,
-        s.signed_in ? L"Sign Out" : L"Sign In to Nintendo Account…");
+    if (s.sign_in_pending) {
+        if (s.manual_sign_in) add(CmdPasteSignIn, L"Paste Sign-In Link…");
+        add(CmdCancelSignIn, L"Cancel Sign-In");
+    } else {
+        add(CmdAccount, s.signed_in ? L"Sign Out" : L"Sign In to Nintendo Account…");
+    }
+    if (s.legacy_credential) add(CmdClearCredential, L"Clear Saved Credential…");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(CmdExit, L"Exit");
 
@@ -580,26 +745,76 @@ void tray_menu(PlatformUi::Impl* ui) {
         ui->window,
         nullptr);
     DestroyMenu(menu);
+    for (const auto preview : menu_thumbnails) DeleteObject(preview);
+    if (selected >= kRecentCommand && selected < kRecentCommand + recent_count) {
+        const auto& path = s.recent_captures[selected - kRecentCommand];
+        const bool copied = ui->dashboard.copy_capture(path);
+        if (!copied) MessageBoxW(ui->dashboard.visible_window(), L"Could not copy this capture.", kAppTitle, MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     invoke(ui, selected);
 }
 
 LRESULT CALLBACK tray_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == kTrayMessage) {
         const UINT event = LOWORD(lp);
+        if (event == NIN_BALLOONUSERCLICK && g_ui) {
+            std::vector<std::filesystem::path> captures;
+            {
+                std::lock_guard lock(g_ui->mutex);
+                captures.swap(g_ui->notification_captures);
+                g_ui->balloon_active = false;
+            }
+            KillTimer(hwnd, kNotificationTimer);
+            PostMessageW(hwnd, kNotificationReady, 0, 0);
+            if (!captures.empty()) {
+                update_dashboard(g_ui);
+                g_ui->dashboard.show_arrivals(captures);
+            }
+            return 0;
+        }
+        if ((event == NIN_BALLOONHIDE || event == NIN_BALLOONTIMEOUT) && g_ui) {
+            std::lock_guard lock(g_ui->mutex);
+            g_ui->notification_captures.clear();
+            g_ui->balloon_active = false;
+            KillTimer(hwnd, kNotificationTimer);
+            PostMessageW(hwnd, kNotificationReady, 0, 0);
+            return 0;
+        }
         if (event == WM_RBUTTONUP || event == WM_CONTEXTMENU) {
             tray_menu(g_ui);
             return 0;
         }
-        if (event == WM_LBUTTONDBLCLK) {
-            invoke(g_ui, CmdOpen);
+        if (event == NIN_SELECT || event == NIN_KEYSELECT || event == WM_LBUTTONUP ||
+            event == WM_LBUTTONDBLCLK) {
+            invoke(g_ui, CmdDashboard);
             return 0;
         }
+    }
+    if (msg == kStateChanged) {
+        update_dashboard(g_ui);
+        return 0;
+    }
+    if (msg == kNotificationReady && g_ui) {
+        show_next_notification(g_ui, hwnd);
+        return 0;
+    }
+    if (msg == WM_TIMER && wp == kNotificationTimer && g_ui) {
+        KillTimer(hwnd, kNotificationTimer);
+        {
+            std::lock_guard lock(g_ui->mutex);
+            g_ui->balloon_active = false;
+            g_ui->notification_captures.clear();
+        }
+        show_next_notification(g_ui, hwnd);
+        return 0;
     }
     if (msg == WM_CLOSE) {
         DestroyWindow(hwnd);
         return 0;
     }
     if (msg == WM_DESTROY) {
+        if (g_ui) g_ui->window = nullptr;
         PostQuitMessage(0);
         return 0;
     }
@@ -613,6 +828,7 @@ PlatformUi::~PlatformUi() { delete impl_; }
 void PlatformUi::run(const PlatformCallbacks& callbacks) {
     impl_->callbacks = callbacks;
     g_ui = impl_;
+    SetCurrentProcessExplicitAppUserModelID(L"minimalhandle.CaptureDock");
 
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};
@@ -626,7 +842,7 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
     impl_->window = CreateWindowExW(
         0,
         kTrayClass,
-        L"NSO Album Sync",
+        kAppTitle,
         0,
         0,
         0,
@@ -640,115 +856,113 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
     impl_->tray.cbSize = sizeof(impl_->tray);
     impl_->tray.hWnd = impl_->window;
     impl_->tray.uID = 1;
-    impl_->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    impl_->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     impl_->tray.uCallbackMessage = kTrayMessage;
     impl_->tray.hIcon = app_icon();
-    wcscpy_s(impl_->tray.szTip, L"NSO Album Sync");
+    wcscpy_s(impl_->tray.szTip, kAppTitle);
 
-    if (!Shell_NotifyIconW(NIM_ADD, &impl_->tray)) {
+    if (!impl_->window) {
         MessageBoxW(
             nullptr,
-            L"Could not create the NSO Album Sync tray icon.",
-            L"NSO Album Sync",
+            L"Could not start the CaptureDock window.",
+            kAppTitle,
             MB_OK | MB_ICONERROR);
+        g_ui = nullptr;
         return;
     }
+    impl_->tray_available = Shell_NotifyIconW(NIM_ADD, &impl_->tray) != FALSE;
+    if (impl_->tray_available) {
+        impl_->tray.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &impl_->tray);
+    }
 
-    impl_->tray.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &impl_->tray);
+    const auto previous_dpi = SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    const bool dashboard_created = impl_->dashboard.create(app_icon(), impl_->callbacks,
+        [this](const auto& path) { return copy_file_to_clipboard(path); }, impl_->tray_available);
+    if (previous_dpi) SetThreadDpiAwarenessContext(previous_dpi);
+    if (!dashboard_created && !impl_->tray_available) {
+        DestroyWindow(impl_->window);
+        g_ui = nullptr;
+        MessageBoxW(nullptr, L"Could not open the dashboard or tray icon.", kAppTitle,
+                    MB_OK | MB_ICONERROR);
+        return;
+    }
+    update_dashboard(impl_);
+    if (!impl_->tray_available || !start_in_tray_requested()) impl_->dashboard.show();
 
     if (callbacks.ready) callbacks.ready();
 
     MSG msg{};
     while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-        TranslateMessage(&msg);
-        DispatchMessageW(&msg);
+        if (!impl_->dashboard.route_key(msg)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
-    Shell_NotifyIconW(NIM_DELETE, &impl_->tray);
+    {
+        std::lock_guard lock(impl_->mutex);
+        if (impl_->tray_available) Shell_NotifyIconW(NIM_DELETE, &impl_->tray);
+        impl_->tray_available = false;
+    }
+    g_ui = nullptr;
 }
 
 void PlatformUi::stop() {
-    if (impl_->window) PostMessageW(impl_->window, WM_CLOSE, 0, 0);
+    if (const HWND window = impl_->window) PostMessageW(window, WM_CLOSE, 0, 0);
 }
 
 void PlatformUi::update(const MenuState& state) {
     std::lock_guard lock(impl_->mutex);
     impl_->state = state;
+    const HWND window = impl_->window;
+    if (window && !impl_->state_posted) {
+        impl_->state_posted = PostMessageW(window, kStateChanged, 0, 0) != FALSE;
+    }
 }
 
 void PlatformUi::notify(
     const std::string& title,
     const std::string& message) {
-    if (!impl_->window) return;
+    notify_captures(title, message, {});
+}
+
+void PlatformUi::notify_captures(const std::string& title, const std::string& message,
+                                 std::vector<std::filesystem::path> captures) {
+    const HWND window = impl_->window;
+    if (!window) return;
     std::lock_guard lock(impl_->mutex);
-    impl_->tray.uFlags = NIF_INFO;
-    wcsncpy_s(impl_->tray.szInfo, wide(message).c_str(), _TRUNCATE);
-    wcsncpy_s(impl_->tray.szInfoTitle, wide(title).c_str(), _TRUNCATE);
-    impl_->tray.dwInfoFlags = NIIF_INFO;
-    Shell_NotifyIconW(NIM_MODIFY, &impl_->tray);
-    impl_->tray.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    if (!impl_->tray_available) return;
+    if (impl_->notifications.size() >= 16) impl_->notifications.pop_front();
+    impl_->notifications.push_back({title, message, std::move(captures)});
+    PostMessageW(window, kNotificationReady, 0, 0);
 }
 
 bool PlatformUi::copy_file_to_clipboard(const std::filesystem::path& path) {
-    std::error_code error;
-    const auto absolute = std::filesystem::absolute(path, error);
-    if (error || !std::filesystem::is_regular_file(absolute, error) || error) {
-        return false;
-    }
-
-    const auto native = absolute.wstring();
-    const auto allocation_size = sizeof(DROPFILES) +
-        (native.size() + 2) * sizeof(wchar_t);
-    HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, allocation_size);
-    if (memory == nullptr) return false;
-
-    auto* drop = static_cast<DROPFILES*>(GlobalLock(memory));
-    if (drop == nullptr) {
-        GlobalFree(memory);
-        return false;
-    }
-
-    drop->pFiles = sizeof(DROPFILES);
-    drop->fWide = TRUE;
-    auto* files = reinterpret_cast<wchar_t*>(
-        reinterpret_cast<unsigned char*>(drop) + sizeof(DROPFILES));
-    std::copy(native.begin(), native.end(), files);
-    files[native.size()] = L'\0';
-    files[native.size() + 1] = L'\0';
-    GlobalUnlock(memory);
-
-    bool success = false;
-    if (OpenClipboard(impl_->window)) {
-        if (EmptyClipboard() && SetClipboardData(CF_HDROP, memory) != nullptr) {
-            success = true;
-            memory = nullptr;
-        }
-        const bool closed = CloseClipboard() != FALSE;
-        success = success && closed;
-    }
-
-    if (memory != nullptr) GlobalFree(memory);
-    return success;
+    return copy_capture_files(impl_->window, {path});
 }
 
 std::string PlatformUi::prompt(
     const std::string& title,
     const std::string& message,
     const std::string& initial) {
-    return prompt_box(title, message, initial);
+    return prompt_box(title, message, initial, impl_->dashboard.visible_window());
 }
 
 bool PlatformUi::confirm(
     const std::string& title,
     const std::string& message) {
     if (title == kNxapiDisclosureTitle) {
-        return disclosure_box(title, message);
+        return disclosure_box(title, message, impl_->dashboard.visible_window());
     }
     return MessageBoxW(
-        impl_->window,
+        impl_->dashboard.visible_window(),
         wide(message).c_str(),
         wide(title).c_str(),
         MB_YESNO | MB_ICONINFORMATION | MB_DEFBUTTON2) == IDYES;
+}
+
+std::string PlatformUi::choose_import_source() {
+    return pick_import_source(impl_->dashboard.visible_window());
 }
 
 std::string PlatformUi::choose_folder(const std::string& initial) {
@@ -785,7 +999,7 @@ std::string PlatformUi::choose_folder(const std::string& initial) {
             }
         }
 
-        if (SUCCEEDED(dialog->Show(impl_->window))) {
+        if (SUCCEEDED(dialog->Show(impl_->dashboard.visible_window()))) {
             IShellItem* item = nullptr;
             if (SUCCEEDED(dialog->GetResult(&item)) && item) {
                 PWSTR path = nullptr;
@@ -853,14 +1067,7 @@ void set_start_on_boot(bool enabled) {
         return;
     }
 
-    const std::wstring value = L"\"" + exe + L"\"";
-    RegSetValueExW(
-        key,
-        kRunValue,
-        0,
-        REG_SZ,
-        reinterpret_cast<const BYTE*>(value.c_str()),
-        static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t)));
+    write_startup_command(key, L"\"" + exe + L"\"");
     RegCloseKey(key);
 }
 }  // namespace nso

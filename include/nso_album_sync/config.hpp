@@ -10,10 +10,13 @@
 
 namespace nso {
 
-inline constexpr std::uint64_t kDiscordApplicationId = 1538902170433495172ULL;
+inline constexpr std::uint64_t kDiscordApplicationId = 1569740622355632200ULL;
+
+enum class SessionStorage { none, secure, session_only, legacy, unavailable };
 
 struct AppConfig {
     std::string session_token;
+    SessionStorage session_storage = SessionStorage::none;
     std::string user_nickname = "Nintendo Switch Player";
     std::string destination_folder;
 
@@ -47,6 +50,7 @@ public:
     void load();
     void save();
     void clear_session();
+    void clear_legacy_credential();
 
     const std::filesystem::path& directory() const { return directory_; }
 
@@ -54,6 +58,8 @@ private:
     std::filesystem::path directory_;
     std::filesystem::path config_file_;
     AppConfig config_;
+    std::string legacy_session_marker_;
+    bool secure_marker_on_disk_ = false;
     mutable std::mutex mutex_;
 
     void save_locked();

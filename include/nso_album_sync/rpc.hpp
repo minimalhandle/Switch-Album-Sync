@@ -1,6 +1,7 @@
 #pragma once
 #include "nso_album_sync/coral.hpp"
 #include "nso_album_sync/rpc_settings.hpp"
+#include "nso_album_sync/zeldanotes.hpp"
 #include <chrono>
 #include <initializer_list>
 
@@ -27,8 +28,7 @@ inline RpcGameService rpc_game_service_for(const NintendoPresence& presence) {
     if (presence.title_id == "0100c2500fc20000") return RpcGameService::Splatoon3;
     if (presence.title_id == "01003bc0000a0000") return RpcGameService::Splatoon2;
     if (presence.title_id == "01006f8002326000") return RpcGameService::AnimalCrossing;
-    if (presence.title_id == "01007ef00011e000" ||
-        presence.title_id == "0100f2c0115b6000") {
+    if (zelda_notes_game_for_title_id(presence.title_id) != ZeldaNotesGame::Unknown) {
         return RpcGameService::ZeldaNotes;
     }
 

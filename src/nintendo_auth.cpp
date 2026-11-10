@@ -99,7 +99,7 @@ AuthResult NintendoAuthManager::complete_login(const std::string& callback_url) 
     if (!error.empty()) {
         throw std::runtime_error(error == "access_denied"
             ? "Nintendo Account sign-in was cancelled."
-            : "Nintendo Account sign-in failed: " + error);
+            : "Nintendo Account sign-in failed.");
     }
 
     const auto code = extract_parameter(callback_url, "session_token_code");
@@ -124,8 +124,8 @@ AuthResult NintendoAuthManager::complete_login(const std::string& callback_url) 
         } else {
             std::cerr << "Nintendo profile returned no nickname\n";
         }
-    } catch (const std::exception& error) {
-        std::cerr << "Nintendo profile lookup failed: " << error.what() << '\n';
+    } catch (const std::exception&) {
+        std::cerr << "Nintendo profile lookup failed\n";
     }
 
     return {session_token, tokens.id_token, tokens.access_token, nickname};
@@ -146,7 +146,7 @@ std::string NintendoAuthManager::exchange_code(
 
     if (response.status / 100 != 2) {
         throw std::runtime_error("Nintendo session-token exchange failed (HTTP " +
-            std::to_string(response.status) + "): " + response.text());
+            std::to_string(response.status) + ")");
     }
 
     const auto json = Json::parse(response.text());
@@ -179,8 +179,14 @@ TokenResponse NintendoAuthManager::exchange_session_token(const std::string& ses
     });
 
     if (response.status / 100 != 2) {
+        bool invalid_grant = false;
+        try {
+            invalid_grant = Json::parse(response.text()).string("error") == "invalid_grant";
+        } catch (const std::exception&) {
+        }
+        if (invalid_grant) throw NintendoSessionExpired();
         throw std::runtime_error("Nintendo token exchange failed (HTTP " +
-            std::to_string(response.status) + "): " + response.text());
+            std::to_string(response.status) + ")");
     }
 
     const auto json = Json::parse(response.text());

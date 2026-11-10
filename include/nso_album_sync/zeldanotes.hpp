@@ -18,12 +18,14 @@ inline constexpr std::uint64_t kZeldaNotesGameServiceIdAlt = 4974384874151936ULL
 
 inline constexpr char kZeldaNotesBotwTitleId[] = "01007ef00011e000";
 inline constexpr char kZeldaNotesTotkTitleId[] = "0100f2c0115b6000";
+inline constexpr char kZeldaNotesOotTitleId[] = "0400486024dec000";
 inline constexpr auto kZeldaNotesLiveFreshness = std::chrono::minutes(5);
 
 enum class ZeldaNotesGame {
     Unknown,
     BreathOfTheWild,
     TearsOfTheKingdom,
+    OcarinaOfTime,
 };
 
 enum class ZeldaNotesLayer {
@@ -55,6 +57,10 @@ struct ZeldaNotesLiveState {
     ZeldaNotesLayer layer = ZeldaNotesLayer::Unknown;
     ZeldaNotesVector3 position;
     ZeldaNotesVector3 front;
+    std::string area_name;
+    std::string area_id;
+    std::string stage_id;
+    std::string zone_id;
     bool synchronized = false;
     std::chrono::steady_clock::time_point received_at{};
 };
@@ -90,6 +96,7 @@ struct ZeldaNotesResolvedLocation {
 };
 
 inline ZeldaNotesGame zelda_notes_game_for_title_id(const std::string& title_id) {
+    if (title_id == kZeldaNotesOotTitleId) return ZeldaNotesGame::OcarinaOfTime;
     if (title_id == kZeldaNotesBotwTitleId) {
         return ZeldaNotesGame::BreathOfTheWild;
     }
@@ -121,6 +128,8 @@ inline const char* zelda_notes_game_id(ZeldaNotesGame game) {
             return "0";
         case ZeldaNotesGame::TearsOfTheKingdom:
             return "1";
+        case ZeldaNotesGame::OcarinaOfTime:
+            return "2";
         case ZeldaNotesGame::Unknown:
             return "";
     }
@@ -133,6 +142,8 @@ inline const char* zelda_notes_short_name(ZeldaNotesGame game) {
             return "botw";
         case ZeldaNotesGame::TearsOfTheKingdom:
             return "totk";
+        case ZeldaNotesGame::OcarinaOfTime:
+            return "oot";
         case ZeldaNotesGame::Unknown:
             return "";
     }
@@ -205,7 +216,7 @@ public:
     ZeldaNotesClient(const ZeldaNotesClient&) = delete;
     ZeldaNotesClient& operator=(const ZeldaNotesClient&) = delete;
 
-    ZeldaNotesPresence fetch_presence(const std::string& web_service_token);
+    bool prepare_session(const std::string& web_service_token);
 
     void set_locale(const std::string& language, const std::string& country);
     void clear_cache();

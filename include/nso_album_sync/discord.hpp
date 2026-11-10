@@ -5,7 +5,13 @@
 #include <cstdint>
 #include <memory>
 
+#ifndef NSO_ENABLE_DISCORD
+#define NSO_ENABLE_DISCORD 1
+#endif
+
 namespace nso {
+
+inline constexpr bool discord_available = NSO_ENABLE_DISCORD != 0;
 
 class DiscordPresence {
 public:

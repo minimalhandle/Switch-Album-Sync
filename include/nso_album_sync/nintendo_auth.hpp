@@ -4,9 +4,15 @@
 
 #include <chrono>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 
 namespace nso {
+
+class NintendoSessionExpired : public std::runtime_error {
+public:
+    NintendoSessionExpired() : std::runtime_error("Nintendo Account session expired") {}
+};
 
 struct TokenResponse {
     std::string id_token;
