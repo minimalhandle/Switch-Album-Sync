@@ -25,8 +25,26 @@ public:
     }
 
 private:
+    // Real payloads nest a handful of levels. The cap stops a hostile or
+    // corrupt document from exhausting the stack through recursion.
+    static constexpr int kMaxDepth = 128;
+
     const std::string& text_;
     std::size_t position_ = 0;
+    int depth_ = 0;
+
+    class DepthGuard {
+    public:
+        explicit DepthGuard(Parser& parser) : parser_(parser) {
+            if (++parser_.depth_ > kMaxDepth) parser_.fail("nesting too deep");
+        }
+        ~DepthGuard() { --parser_.depth_; }
+        DepthGuard(const DepthGuard&) = delete;
+        DepthGuard& operator=(const DepthGuard&) = delete;
+
+    private:
+        Parser& parser_;
+    };
 
     [[noreturn]] void fail(const char* reason) const {
         throw std::runtime_error(
@@ -68,10 +86,14 @@ private:
         const char character = text_[position_];
 
         switch (character) {
-            case '{':
+            case '{': {
+                const DepthGuard guard(*this);
                 return parse_object();
-            case '[':
+            }
+            case '[': {
+                const DepthGuard guard(*this);
                 return parse_array();
+            }
             case '"':
                 return Json(parse_string());
             case 't':

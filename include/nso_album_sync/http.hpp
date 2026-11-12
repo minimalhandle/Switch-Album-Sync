@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <stdexcept>
@@ -35,6 +37,11 @@ public:
 
     void set_proxy(std::string proxy) { proxy_ = std::move(proxy); }
     std::string proxy_url() const { return static_cast<std::string>(proxy_); }
+
+    // Tests only: send every https://<host>/<path> request to
+    // http://127.0.0.1:<port>/<host>/<path> instead, so a local mock can stand
+    // in for Nintendo and nxapi. 0 (the default) turns it off.
+    void redirect_to_loopback(unsigned short port) { loopback_port_ = port; }
 
     HttpResponse request(
         const std::string& method,
@@ -97,6 +104,15 @@ private:
     };
 
     SynchronizedString proxy_;
+    std::atomic<unsigned short> loopback_port_{0};
+
+    // One WinHTTP session keeps TLS connections alive between requests. It is
+    // rebuilt when the proxy changes; requests already running keep their own
+    // reference to the previous session until they finish.
+    std::shared_ptr<void> session() const;
+    mutable std::mutex session_mutex_;
+    mutable std::shared_ptr<void> session_;
+    mutable std::string session_proxy_;
 };
 
 }  // namespace nso

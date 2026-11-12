@@ -150,20 +150,6 @@ inline const char* zelda_notes_short_name(ZeldaNotesGame game) {
     return "";
 }
 
-inline const char* zelda_notes_layer_rpc_name(ZeldaNotesLayer layer) {
-    switch (layer) {
-        case ZeldaNotesLayer::Ground:
-            return "Surface";
-        case ZeldaNotesLayer::Sky:
-            return "Sky";
-        case ZeldaNotesLayer::Underground:
-            return "Depths";
-        case ZeldaNotesLayer::Unknown:
-            return "";
-    }
-    return "";
-}
-
 ZeldaNotesLayer zelda_notes_layer_from_wire(const std::string& layer);
 std::string zelda_notes_generate_porter_session_id();
 

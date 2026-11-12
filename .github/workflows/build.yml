@@ -14,8 +14,9 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v6
-      - run: cmake -S . -B build -A x64 -DNSO_ENABLE_DISCORD=OFF -DNSO_STATIC_RUNTIME=ON
+      - run: cmake -S . -B build -A x64 -DNSO_ENABLE_DISCORD=OFF -DNSO_STATIC_RUNTIME=ON -DNSO_BUILD_TESTS=ON
       - run: cmake --build build --config Release --parallel
+      - run: ctest --test-dir build -C Release --output-on-failure
       - shell: pwsh
         run: |
           $test = Start-Process "build/Release/Switch Album Sync.exe" -ArgumentList '--self-test' -Wait -PassThru

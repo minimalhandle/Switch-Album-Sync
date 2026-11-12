@@ -2,6 +2,7 @@
 
 #include "nso_album_sync/json.hpp"
 #include "nso_album_sync/util.hpp"
+#include "nso_album_sync/version.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -22,11 +23,12 @@ constexpr char kZncaBaseUrl[] =
     "https://nxapi-znca-api.fancy.org.uk/api/znca";
 constexpr char kNxapiAuthUrl[] =
     "https://nxapi-auth.fancy.org.uk/api/oauth/token";
+// The public API terms require a User-Agent with the project name, version and
+// contact details, in the preferred `project/version (+url)` form.
 constexpr char kUserAgent[] =
-    "switch-album-sync/2.0.0 (+https://github.com/minimalhandle/NSO-Album-Sync)";
-constexpr char kZncaClientVersion[] = "d8fAZDPzwimzQ7c6";
-constexpr char kCoralLoginUrl[] =
-    "https://api-lp1.znc.srv.nintendo.net/v4/Account/Login";
+    "switch-album-sync/" NSO_APP_VERSION " (+" NSO_PROJECT_URL ")";
+// Must be sent on every request and must never be set dynamically.
+constexpr char kZncaClientVersion[] = NSO_ZNCA_CLIENT_VERSION;
 
 constexpr auto kVersionCacheLifetime = std::chrono::hours(6);
 constexpr auto kVersionRetryLifetime = std::chrono::minutes(15);
@@ -36,7 +38,6 @@ std::vector<std::string> znca_headers(const std::string& nso_version) {
     return {
         "X-znca-Platform: Android",
         "X-znca-Version: " + nso_version,
-        std::string("X-znca-Client-Version: ") + kZncaClientVersion,
     };
 }
 
@@ -59,6 +60,18 @@ void replace_cache_file(
         std::error_code ignored;
         std::filesystem::remove(temporary, ignored);
     }
+}
+
+// nxapi explains failures with an error code such as incompatible_client.
+// Only the code is kept: it identifies the problem and contains no user data.
+std::string error_code(const HttpResponse& response) {
+    try {
+        const auto code = Json::parse(response.text()).string("error");
+        if (!code.empty() && code.size() <= 64 &&
+            code.find_first_not_of("abcdefghijklmnopqrstuvwxyz_") == std::string::npos) return ", " + code;
+    } catch (...) {
+    }
+    return {};
 }
 
 std::chrono::seconds retry_after_delay(const std::string& value) {
@@ -161,9 +174,12 @@ void NxapiClient::throw_if_rate_limited() const {
 
 void NxapiClient::apply_rate_limit_response(const HttpResponse& response) {
     if (response.status == 401) {
-        // Do not retry automatically. Forget the rejected in-memory bearer
-        // token so the next independent user action can obtain a new one.
-        clear_user_auth();
+        // The access token was rejected (invalid_token). Do not retry this
+        // request. Forget only the access token: nxapi-auth's docs say to
+        // renew with the refresh token, which the next request will do.
+        std::lock_guard lock(auth_mutex_);
+        auth_token_.clear();
+        auth_expiry_ = {};
     }
 
     if (response.status == 406) {
@@ -292,6 +308,7 @@ HttpResponse NxapiClient::znca_request(
     std::vector<std::string> headers{
         "Accept: " + accept,
         std::string("User-Agent: ") + kUserAgent,
+        std::string("X-znca-Client-Version: ") + kZncaClientVersion,
     };
     const auto bearer_token = auth_token();
     if (!bearer_token.empty()) {
@@ -335,46 +352,6 @@ std::string NxapiClient::nso_version() {
         "Could not retrieve supported NSO version from nxapi /config");
 }
 
-std::vector<unsigned char> NxapiClient::encrypted_login_body(
-    const std::string& id_token,
-    const UserProfile& profile) {
-    const auto version = nso_version();
-
-    // `/f` output is request-specific (it includes the request timestamp/id and
-    // encrypted login body), so it must not be reused as a long-lived token.
-    // The reusable credential is the Coral access token returned by Account/Login;
-    // CoralClient persists that credential for its server-provided lifetime.
-    const Json payload(Json::object{
-        {"token", id_token},
-        {"hash_method", "1"},
-        {"na_id", profile.id},
-        {"encrypt_token_request",
-         Json::object{
-             {"url", kCoralLoginUrl},
-             {"parameter",
-              Json::object{
-                  {"naIdToken", id_token},
-                  {"language", profile.language},
-                  {"f", ""},
-                  {"requestId", ""},
-                  {"timestamp", 0},
-              }},
-         }},
-    });
-
-    const auto response = znca_request(
-        "POST", "/f", payload.dump(), "application/json", znca_headers(version));
-    if (response.status / 100 != 2) {
-        throw std::runtime_error("nxapi /f failed (HTTP " + std::to_string(response.status) + ")");
-    }
-    const auto encrypted =
-        Json::parse(response.text()).string("encrypted_token_request");
-    if (encrypted.empty()) {
-        throw std::runtime_error("nxapi /f missing encrypted_token_request");
-    }
-    return base64_decode(encrypted);
-}
-
 FAttestation NxapiClient::generate_f(
     int hash_method,
     const std::string& token,
@@ -396,7 +373,7 @@ FAttestation NxapiClient::generate_f(
     const auto response = znca_request(
         "POST", "/f", payload.dump(), "application/json", znca_headers(version));
     if (response.status / 100 != 2) {
-        throw std::runtime_error("nxapi /f failed (HTTP " + std::to_string(response.status) + ")");
+        throw std::runtime_error("nxapi /f failed (HTTP " + std::to_string(response.status) + error_code(response) + ")");
     }
     const auto json = Json::parse(response.text());
     FAttestation attestation;
@@ -407,47 +384,6 @@ FAttestation NxapiClient::generate_f(
         throw std::runtime_error("nxapi /f returned incomplete attestation");
     }
     return attestation;
-}
-
-std::vector<unsigned char> NxapiClient::encrypted_web_service_token_body(
-    const std::string& coral_access_token,
-    const std::string& na_id,
-    const std::string& coral_user_id,
-    std::uint64_t game_service_id) {
-    const auto version = nso_version();
-
-    const Json payload(Json::object{
-        {"token", coral_access_token},
-        {"hash_method", "2"},
-        {"na_id", na_id},
-        {"coral_user_id", coral_user_id},
-        {"encrypt_token_request",
-         Json::object{
-             {"url", "https://api-lp1.znc.srv.nintendo.net/v4/Game/GetWebServiceToken"},
-             {"parameter",
-              Json::object{
-                  {"id", static_cast<double>(game_service_id)},
-                  {"registrationToken", ""},
-                  {"f", ""},
-                  {"requestId", ""},
-                  {"timestamp", 0},
-              }},
-         }},
-    });
-
-    const auto response = znca_request(
-        "POST", "/f", payload.dump(), "application/json", znca_headers(version));
-    if (response.status / 100 != 2) {
-        throw std::runtime_error(
-            "nxapi /f (hash_method 2) failed (HTTP " + std::to_string(response.status) + ")");
-    }
-    const auto encrypted =
-        Json::parse(response.text()).string("encrypted_token_request");
-    if (encrypted.empty()) {
-        throw std::runtime_error(
-            "nxapi /f (hash_method 2) missing encrypted_token_request");
-    }
-    return base64_decode(encrypted);
 }
 
 std::vector<unsigned char> NxapiClient::encrypt_request(
@@ -465,7 +401,7 @@ std::vector<unsigned char> NxapiClient::encrypt_request(
         znca_headers(version));
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "nxapi /encrypt-request failed (HTTP " + std::to_string(response.status) + ")");
+            "nxapi /encrypt-request failed (HTTP " + std::to_string(response.status) + error_code(response) + ")");
     }
     const auto encrypted = Json::parse(response.text()).string("data");
     if (encrypted.empty()) {
@@ -483,7 +419,7 @@ std::string NxapiClient::decrypt_response(
         znca_headers(version));
     if (response.status / 100 != 2) {
         throw std::runtime_error(
-            "nxapi /decrypt-response failed (HTTP " + std::to_string(response.status) + ")");
+            "nxapi /decrypt-response failed (HTTP " + std::to_string(response.status) + error_code(response) + ")");
     }
     return response.text();
 }

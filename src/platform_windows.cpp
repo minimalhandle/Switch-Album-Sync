@@ -26,14 +26,19 @@ constexpr int kIconId = 101;
 constexpr UINT kRecentCommand = 2000;
 constexpr std::size_t kRecentLimit = 8;
 constexpr int kDisclosureSourceButton = 1101;
+constexpr int kDisclosureHelpButton = 1102;
 constexpr wchar_t kAppTitle[] = L"Switch Album Sync";
 constexpr wchar_t kTrayClass[] = L"SwitchAlbumSyncTray";
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"Switch Album Sync";
 constexpr wchar_t kStartInTray[] = L"--start-in-tray";
 constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
+// The nxapi terms ask clients that sign in with a user's account to link the
+// project, and allow linking its end-user help.
 constexpr char kNxapiSourceUrl[] =
     "https://github.com/samuelthomas2774/nxapi-znca-api";
+constexpr char kNxapiHelpUrl[] =
+    "https://github.com/samuelthomas2774/nxapi-znca-api/blob/docs/docs/end-user-help.md";
 
 enum Command : UINT {
     CmdSync = 1001, CmdCopy, CmdAuto, CmdNotifications, CmdDiscord, CmdFolder,
@@ -133,12 +138,15 @@ bool disclosure_box(const std::string& title, const std::string& text, HWND owne
     dialog.title = wide(title);
     dialog.heading = wide(title);
     dialog.text = wide(text);
-    dialog.width = 560;
+    dialog.width = 600;
     dialog.buttons = {{kDisclosureSourceButton, L"View source", false, false},
+                      {kDisclosureHelpButton, L"nxapi help", false, false},
                       {IDOK, L"Continue", true}, {IDCANCEL, L"Cancel"}};
     dialog.on_command = [](int id) {
-        if (id != kDisclosureSourceButton) return;
-        const auto url = wide(kNxapiSourceUrl);
+        const char* link = id == kDisclosureSourceButton ? kNxapiSourceUrl :
+            id == kDisclosureHelpButton ? kNxapiHelpUrl : nullptr;
+        if (!link) return;
+        const auto url = wide(link);
         ShellExecuteW(nullptr, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     };
     return theme::run_dialog(owner, dialog) == IDOK;
@@ -226,6 +234,7 @@ void update_dashboard(PlatformUi::Impl* ui) {
         ui->state_posted = false;
         state = ui->state;
     }
+    theme::set_appearance(state.appearance);
     ui->dashboard.update(state);
 }
 
@@ -441,6 +450,7 @@ void PlatformUi::run(const PlatformCallbacks& callbacks) {
     g_ui = impl_;
     SetCurrentProcessExplicitAppUserModelID(L"minimalhandle.SwitchAlbumSync");
     theme::init_process();
+    update_dashboard(impl_);
 
     const HINSTANCE instance = GetModuleHandleW(nullptr);
     WNDCLASSW wc{};
@@ -568,6 +578,23 @@ bool PlatformUi::confirm(
     }
     return theme::message_box(impl_->dashboard.visible_window(), wide(message), wide(title),
                               MB_YESNO | MB_DEFBUTTON2) == IDYES;
+}
+
+std::optional<std::vector<int>> PlatformUi::choose_options(
+    const std::string& title,
+    const std::string& message,
+    const std::vector<std::string>& choices,
+    const std::vector<int>& selected) {
+    theme::Dialog dialog;
+    dialog.title = wide(title);
+    dialog.heading = wide(title);
+    dialog.text = wide(message);
+    dialog.width = 540;
+    for (const auto& choice : choices) dialog.choices.push_back(wide(choice));
+    dialog.selected = selected;
+    dialog.buttons = {{IDOK, L"Save", true}, {IDCANCEL, L"Cancel"}};
+    if (theme::run_dialog(impl_->dashboard.visible_window(), dialog) != IDOK) return std::nullopt;
+    return dialog.selected;
 }
 
 std::shared_ptr<const ImportPlan> PlatformUi::choose_import_plan(const std::filesystem::path& album) {

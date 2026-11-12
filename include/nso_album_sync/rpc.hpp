@@ -14,6 +14,20 @@ enum class RpcGameService {
     Splatoon2,
 };
 
+// Rich Presence polls Nintendo for your status. Keep a steady pace while a game
+// is running, and slow down once a few checks in a row find you offline (or
+// fail), so an idle PC makes far fewer requests. Explicit refreshes still run
+// immediately.
+inline constexpr auto kPresencePlayingInterval = std::chrono::seconds(60);
+inline constexpr auto kPresenceOfflineInterval = std::chrono::seconds(300);
+inline constexpr int kPresenceOfflineChecksBeforeBackoff = 3;
+
+inline std::chrono::seconds presence_poll_interval(bool playing, int consecutive_offline_polls) {
+    return playing || consecutive_offline_polls < kPresenceOfflineChecksBeforeBackoff
+        ? kPresencePlayingInterval
+        : kPresenceOfflineInterval;
+}
+
 inline bool rpc_contains_any(const std::string& text, std::initializer_list<const char*> needles) {
     for (const auto* needle : needles) {
         if (needle != nullptr && text.find(needle) != std::string::npos) return true;

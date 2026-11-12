@@ -8,6 +8,7 @@
 #include "nso_album_sync/nintendo_auth.hpp"
 #include "nso_album_sync/nxapi.hpp"
 #include "nso_album_sync/platform.hpp"
+#include "nso_album_sync/rpc_enricher.hpp"
 #include "nso_album_sync/splatnet.hpp"
 #include "nso_album_sync/sync.hpp"
 #include "nso_album_sync/zeldanotes.hpp"
@@ -39,6 +40,7 @@ private:
     SplatNetClient splatnet_;
     ZeldaNotesClient zeldanotes_;
     GameServicesClient game_services_;
+    RpcEnricher rpc_enricher_;
     SyncEngine sync_;
     DiscordPresence discord_;
     PlatformUi ui_;
@@ -59,7 +61,7 @@ private:
     std::thread presence_thread_;
     std::thread auth_callback_thread_;
 
-    enum class SyncRequest { none, automatic, manual, retry, automatic_retry, local_import };
+    enum class SyncRequest { none, automatic, manual, retry, automatic_retry, local_import, backup };
 
     std::mutex sync_queue_mutex_;
     std::condition_variable sync_queue_cv_;
@@ -93,6 +95,8 @@ private:
     std::string status_ = "Ready";
     std::string sync_detail_;
     std::string diagnostic_code_ = "none";
+    // Last technical error, for Copy diagnostics (step and status only).
+    std::string last_error_;
     SyncProgress sync_progress_;
     std::chrono::sys_seconds next_sync_{};
     std::vector<std::string> failed_ids_;
@@ -108,6 +112,10 @@ private:
     void queue_recent_refresh();
     void refresh_recent_captures();
     std::vector<std::filesystem::path> import_captures(const ImportPlan& plan);
+    // Copies new and changed captures to the backup folder, if one is set.
+    void run_backup(bool announce);
+    // Set when a sync or import added files, so the next idle moment backs up.
+    bool backup_pending_ = false;
     void reschedule_auto_sync();
     void request_presence_refresh();
     void sign_in_or_out();

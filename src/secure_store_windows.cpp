@@ -4,6 +4,7 @@
 #include "nso_album_sync/windows_compat.hpp"
 #include <wincred.h>
 
+#include <mutex>
 #include <string>
 
 #pragma comment(lib, "Advapi32.lib")
@@ -37,11 +38,21 @@ std::wstring utf8_to_wide(const std::string& text) {
     return result;
 }
 
+std::mutex g_namespace_mutex;
+std::wstring g_namespace = L"Switch Album Sync";
+
 std::wstring credential_target(const std::string& account) {
-    return L"Switch Album Sync/" + utf8_to_wide(account);
+    std::lock_guard lock(g_namespace_mutex);
+    return g_namespace + L"/" + utf8_to_wide(account);
 }
 
 }  // namespace
+
+void SecureStore::use_namespace(const std::string& name) {
+    auto wide = utf8_to_wide(name);
+    std::lock_guard lock(g_namespace_mutex);
+    g_namespace = std::move(wide);
+}
 
 bool SecureStore::available() {
     return true;

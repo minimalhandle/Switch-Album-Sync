@@ -5,11 +5,6 @@
 #include "nso_album_sync/windows_compat.hpp"
 #include "theme_windows.hpp"
 #include <shellapi.h>
-#ifdef _MSC_VER
-// Let MSVC/CMake generate the executable manifest and merge this dependency
-// instead of embedding a second RT_MANIFEST resource through app.rc.
-#pragma comment(linker, "/manifestdependency:\"type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'\"")
-#endif
 
 #include <chrono>
 #include <cctype>

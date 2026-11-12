@@ -2,6 +2,7 @@
 #include "nso_album_sync/path.hpp"
 
 #include "nso_album_sync/game_aliases.hpp"
+#include "nso_album_sync/local_data.hpp"
 #include "nso_album_sync/util.hpp"
 
 #include "import_windows.hpp"
@@ -126,19 +127,22 @@ std::string media_retry_id(const MediaItem& item) {
            (item.title_id.empty() ? item.app_name : item.title_id);
 }
 
-std::vector<unsigned char> download_capture(HttpClient& http, const MediaItem& item) {
+std::vector<unsigned char> download_capture(
+    HttpClient& http, const MediaItem& item, const std::string& user_agent) {
     const auto size = static_cast<std::size_t>(item.content_length);
-    auto response = http.get(item.content_uri, {}, 60);
+    std::vector<std::string> headers;
+    if (!user_agent.empty()) headers.push_back("User-Agent: " + user_agent);
+    auto response = http.get(item.content_uri, headers, 60);
+    // Only network failures, where no response arrived (HttpClient raises
+    // TransientHttpError), are retried automatically. Once Nintendo answers
+    // with an error, the app waits for the user to retry instead of
+    // re-requesting on its own.
     if (response.status / 100 != 2) {
-        const auto message = "Media download failed (HTTP " + std::to_string(response.status) + ")";
-        if (response.status == 408 || response.status == 429 || response.status == 500 ||
-            response.status == 502 || response.status == 503 || response.status == 504) {
-            throw TransientHttpError(message);
-        }
-        throw std::runtime_error(message);
+        throw std::runtime_error(
+            "Media download failed (HTTP " + std::to_string(response.status) + ")");
     }
     if (response.body.size() != size) {
-        throw TransientHttpError("Media download size did not match Nintendo's content length");
+        throw std::runtime_error("Media download size did not match Nintendo's content length");
     }
     return std::move(response.body);
 }
@@ -473,7 +477,94 @@ void preserve_capture_timestamp(
     }
 }
 
+constexpr std::int64_t kReceiptRetentionSeconds = 7LL * 24 * 60 * 60;
+// Used when Nintendo doesn't report when a capture expires from its album.
+constexpr std::int64_t kReceiptFallbackLifetimeSeconds = 90LL * 24 * 60 * 60;
+
+std::int64_t unix_seconds(std::int64_t value) {
+    return value > 10'000'000'000LL ? value / 1000 : value;
+}
+
+std::string receipt_album_key(const std::filesystem::path& album) {
+    std::error_code error;
+    auto absolute = std::filesystem::absolute(album, error);
+    if (error) absolute = album;
+    return lower(path_to_utf8(absolute.lexically_normal().make_preferred()));
+}
+
 }  // namespace
+
+bool is_safe_media_url(const std::string& url) {
+    return safe_media_url(url);
+}
+
+std::string capture_filename_prefix(std::int64_t timestamp) {
+    return capture_timestamp_prefix(timestamp);
+}
+
+SyncReceipts::SyncReceipts(std::filesystem::path file, const std::filesystem::path& album)
+    : file_(std::move(file)), album_key_(receipt_album_key(album)) {
+    const auto saved = read_local_data(file_);
+    if (saved.is_object()) {
+        if (const auto* albums = saved.find("albums"); albums && albums->is_object()) {
+            albums_ = albums->as_object();
+        }
+    }
+    // Drop receipts a week after Nintendo's copy expired; the capture can't
+    // come back, so the entry is no longer needed.
+    const auto now = unix_now();
+    for (auto album_entry = albums_.begin(); album_entry != albums_.end();) {
+        if (!album_entry->second.is_object()) {
+            album_entry = albums_.erase(album_entry);
+            dirty_ = true;
+            continue;
+        }
+        auto entries = album_entry->second.as_object();
+        const auto before = entries.size();
+        std::erase_if(entries, [now](const auto& entry) {
+            return !entry.second.is_number() || entry.second.as_i64() + kReceiptRetentionSeconds < now;
+        });
+        if (entries.size() != before) dirty_ = true;
+        if (entries.empty()) {
+            album_entry = albums_.erase(album_entry);
+            continue;
+        }
+        album_entry->second = Json(std::move(entries));
+        ++album_entry;
+    }
+    if (const auto found = albums_.find(album_key_); found != albums_.end()) {
+        entries_ = found->second.as_object();
+    }
+}
+
+bool SyncReceipts::contains(const std::string& media_id) const {
+    return !media_id.empty() && entries_.contains(media_id);
+}
+
+void SyncReceipts::add(const std::string& media_id, std::int64_t expires_at, std::int64_t captured_at) {
+    if (media_id.empty()) return;
+    std::int64_t expiry = unix_seconds(expires_at);
+    if (expiry <= 0) {
+        const auto captured = unix_seconds(captured_at);
+        expiry = (captured > 0 ? captured : unix_now()) + kReceiptFallbackLifetimeSeconds;
+    }
+    const auto existing = entries_.find(media_id);
+    if (existing != entries_.end() && existing->second.as_i64() == expiry) return;
+    entries_[media_id] = Json(expiry);
+    dirty_ = true;
+}
+
+bool SyncReceipts::save() {
+    if (!dirty_) return true;
+    if (entries_.empty()) albums_.erase(album_key_);
+    else albums_[album_key_] = Json(entries_);
+    const bool saved = write_local_data(file_, Json(Json::object{
+        {"version", 1},
+        {"albums", Json(albums_)},
+    }));
+    if (saved) dirty_ = false;
+    return saved;
+}
 
 std::filesystem::path album_directory(const std::filesystem::path& destination) {
     if (destination.empty()) return path_from_utf8(default_album_folder());
@@ -541,21 +632,9 @@ std::vector<LocalCapture> scan_capture_library(
     return captures;
 }
 
-std::vector<std::filesystem::path> recent_captures(
-    const std::filesystem::path& destination, std::size_t limit,
-    const std::function<bool()>& cancelled) {
-    if (limit == 0) return {};
-    auto captures = scan_capture_library(destination, cancelled);
-    std::vector<std::filesystem::path> paths;
-    for (std::size_t i = 0; i < std::min(limit, captures.size()); ++i) {
-        paths.push_back(std::move(captures[i].path));
-    }
-    return paths;
-}
-
-std::string SyncEngine::resolve_game_folder(
+std::string resolve_game_folder(
     const std::filesystem::path& album_directory,
-    const std::string& app_name) const {
+    const std::string& app_name) {
     const auto default_clean = sanitize_folder_v1(app_name);
     if (!std::filesystem::exists(album_directory) || trim(app_name).empty()) {
         return default_clean;
@@ -654,8 +733,9 @@ SyncResult SyncEngine::sync(
     } catch (const NintendoSessionExpired&) {
         throw_if_cancelled(cancelled);
         return fatal(SyncFailure::sign_in);
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
         throw_if_cancelled(cancelled);
+        result.error_detail = error.what();
         return fatal(SyncFailure::service);
     }
     throw_if_cancelled(cancelled);
@@ -683,6 +763,29 @@ SyncResult SyncEngine::sync(
         return fatal(SyncFailure::storage);
     }
     const auto title_folders = learn_title_folders(media, existing);
+
+    SyncReceipts receipts(config_.directory() / "synced-media.json", album);
+    // Save whatever was recorded even if the sync is cancelled part way.
+    struct SaveReceipts {
+        SyncReceipts& receipts;
+        ~SaveReceipts() {
+            try {
+                receipts.save();
+            } catch (...) {
+            }
+        }
+    } save_receipts{receipts};
+    const auto remember = [&](const MediaItem& item) {
+        receipts.add(item.id, item.expires_at, media_timestamp(item));
+    };
+
+    // Downloads from Nintendo's servers identify the same way as the app's
+    // Coral requests. The version is already cached from the album request.
+    std::string user_agent;
+    try {
+        user_agent = coral_.app_user_agent();
+    } catch (const std::exception&) {
+    }
     report(SyncStage::downloading);
 
     for (const auto* selected_item : selected) {
@@ -696,6 +799,16 @@ SyncResult SyncEngine::sync(
         const auto prefix_lower = lower(prefix);
         const auto label = item.app_name + " / " + filename;
 
+        // Synced before: don't download it again, even if the file was since
+        // deleted, renamed or moved, or the PC's time zone changed. Retries of
+        // failed items are never receipted, so they skip this check.
+        if (retry_ids.empty() && receipts.contains(item.id)) {
+            ++result.skipped;
+            result.items.push_back({label, "Already synced", {}});
+            report(SyncStage::downloading);
+            continue;
+        }
+
         const bool existing_filename = existing.filenames_and_prefixes.contains(filename_lower);
         const bool existing_timestamp = existing.filenames_and_prefixes.contains(prefix_lower);
         const auto device_match = existing.device_capture_by_key.find(prefix.substr(0, 14) + "." + extension);
@@ -703,6 +816,7 @@ SyncResult SyncEngine::sync(
         const bool reviewed = can_review && recorded_online_match(album, path_from_utf8(filename));
         const bool review = can_review && !reviewed;
         if (!review && (existing_filename || existing_timestamp || reviewed)) {
+            remember(item);
             ++result.skipped;
             result.items.push_back({label, "Skipped", {}});
             report(SyncStage::downloading);
@@ -714,13 +828,14 @@ SyncResult SyncEngine::sync(
             validate_media_item_for_download(item);
 
             if (review) {
-                const auto body = download_capture(http_, item);
+                const auto body = download_capture(http_, item, user_agent);
                 throw_if_cancelled(cancelled);
                 failure = SyncFailure::storage;
                 stage_online_match(album, path_from_utf8(filename), device_match->second, [&](const auto& incoming) {
                     write_capture(incoming, body, cancelled);
                     preserve_capture_timestamp(incoming, timestamp);
                 });
+                remember(item);
                 ++result.review;
                 result.items.push_back({label, "Ready in Duplicate review", {}});
                 report(SyncStage::downloading);
@@ -735,12 +850,13 @@ SyncResult SyncEngine::sync(
             std::filesystem::create_directories(destination.parent_path());
 
             failure = SyncFailure::download;
-            const auto body = download_capture(http_, item);
+            const auto body = download_capture(http_, item, user_agent);
             throw_if_cancelled(cancelled);
 
             failure = SyncFailure::storage;
             write_capture(destination, body, cancelled);
             preserve_capture_timestamp(destination, timestamp);
+            remember(item);
             existing.filenames_and_prefixes.insert(filename_lower);
             existing.filenames_and_prefixes.insert(prefix_lower);
             ++result.new_downloads;
@@ -762,70 +878,6 @@ SyncResult SyncEngine::sync(
     }
 
     return result;
-}
-
-std::filesystem::path SyncEngine::fetch_latest_capture(
-    const std::function<void()>& video_download_started) {
-    const auto config = config_.snapshot();
-    if (config.session_token.empty()) {
-        throw std::runtime_error("Not signed in to Nintendo Account");
-    }
-
-    const auto media = coral_.media_list(config.session_token);
-    if (media.empty()) {
-        throw std::runtime_error("No captures are currently available from Nintendo");
-    }
-
-    const auto latest = std::max_element(
-        media.begin(),
-        media.end(),
-        [](const MediaItem& left, const MediaItem& right) {
-            return media_timestamp(left) < media_timestamp(right);
-        });
-    validate_media_item_for_download(*latest);
-
-    const bool is_video = lower(latest->type) == "video";
-    const std::string extension = is_video ? "mp4" : "jpg";
-    const auto cache_directory = config_.directory() / "clipboard-cache";
-    std::filesystem::create_directories(cache_directory);
-    const auto destination = cache_directory / ("latest-capture." + extension);
-    auto temporary = destination;
-    temporary += ".part";
-
-    if (is_video && video_download_started) video_download_started();
-    const auto body = download_capture(http_, *latest);
-
-    std::error_code cleanup_error;
-    std::filesystem::remove(temporary, cleanup_error);
-    try {
-        {
-            std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-            if (!file) throw std::runtime_error("Could not create clipboard media file");
-            file.write(
-                reinterpret_cast<const char*>(body.data()),
-                static_cast<std::streamsize>(body.size()));
-            file.flush();
-            if (!file) throw std::runtime_error("Could not write clipboard media file");
-            file.close();
-            if (!file) throw std::runtime_error("Could not finish writing clipboard media file");
-        }
-
-        std::error_code remove_error;
-        std::filesystem::remove(destination, remove_error);
-        std::error_code rename_error;
-        std::filesystem::rename(temporary, destination, rename_error);
-        if (rename_error) {
-            throw std::runtime_error(
-                "Could not finalize clipboard media: " + rename_error.message());
-        }
-    } catch (...) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-        throw;
-    }
-
-    preserve_capture_timestamp(destination, media_timestamp(*latest));
-    return destination;
 }
 
 }  // namespace nso

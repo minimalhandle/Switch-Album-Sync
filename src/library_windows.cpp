@@ -1,5 +1,9 @@
 #include "library_windows.hpp"
+#include "album_tools_windows.hpp"
+#include "annotate_windows.hpp"
 #include "import_windows.hpp"
+#include "text_search_windows.hpp"
+#include "video_windows.hpp"
 #include "share_windows.hpp"
 #include "theme_windows.hpp"
 #include "nso_album_sync/local_data.hpp"
@@ -13,6 +17,7 @@
 #include <shellapi.h>
 #include <shlobj.h>
 #include <wrl/client.h>
+#include <windowsx.h>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -26,10 +31,16 @@ namespace nso {
 namespace {
 constexpr wchar_t kClass[] = L"SwitchAlbumSyncAlbumTools";
 constexpr UINT kApplySelection = WM_APP + 72;
+constexpr UINT kTextIndexed = WM_APP + 73;
+constexpr double kMaxGifSeconds = 15;
 enum Control { Library = 3000, History, Storage, Duplicates, Title, Search, NewCaptures, Game, Date, Type, Favorites,
                Collections, CollectionName, SaveCollection, DeleteCollection, ClearFilters, Runs, NextRetry, Rows, Preview,
                ExistingLabel, IncomingLabel, IncomingPreview, OpenExisting, OpenIncoming, KeepExisting,
-               Tags, Save, Favorite, Play, Stop, Action, Refresh, CopyFiles, QuickShare, Status, VideoSurface, End };
+               Tags, Save, Favorite, Play, Stop, Action, Refresh, CopyFiles, QuickShare, Status, VideoSurface,
+               EditCapture, TextSearch, End,
+               AssignGame };
+// Library list columns, for sorting.
+enum Column { NameColumn, GameColumn, DateColumn, TypeColumn };
 
 std::wstring wide(const std::string& value) {
     if (value.empty()) return {};
@@ -167,21 +178,6 @@ bool copy_capture_files(HWND owner, const CapturePaths& paths) {
     return copied;
 }
 
-bool copy_capture_image(HWND owner, const std::filesystem::path& path) {
-    Imaging imaging;
-    if (!imaging.token) return false;
-    Gdiplus::Bitmap image(path.c_str());
-    HBITMAP bitmap = nullptr;
-    if (image.GetHBITMAP(Gdiplus::Color(255, 255, 255), &bitmap) != Gdiplus::Ok) return false;
-    bool copied = false;
-    if (OpenClipboard(owner)) {
-        copied = EmptyClipboard() && SetClipboardData(CF_BITMAP, bitmap);
-        CloseClipboard();
-    }
-    if (!copied) DeleteObject(bitmap);
-    return copied;
-}
-
 struct WindowsLibrary::Impl {
     HWND window = nullptr;
     std::array<HWND, End - Library> controls{};
@@ -209,14 +205,15 @@ struct WindowsLibrary::Impl {
     UINT dpi = 96;
     HFONT body = nullptr;
     HFONT title = nullptr;
-    HBRUSH paper = theme::brush(theme::kBackground);
-    HBRUSH ink = theme::brush(theme::kPreview);
-    HBRUSH red = theme::brush(theme::kRed);
     Imaging imaging;
     std::unique_ptr<Gdiplus::Image> image;
     std::unique_ptr<Gdiplus::Image> incoming_image;
     Microsoft::WRL::ComPtr<IMFPMediaPlayer> player;
     bool com = false;
+    int sort_column = DateColumn;
+    bool sort_descending = true;
+    bool text_search = false;
+    ScreenshotText screenshot_text;
 
     ~Impl() {
         stop();
@@ -295,13 +292,16 @@ struct WindowsLibrary::Impl {
         button(Play, L"Play");
         button(Stop, L"Stop");
         button(Action, L"Open file");
+        button(EditCapture, L"Edit…");
+        button(TextSearch, L"Text in screenshots", BS_AUTOCHECKBOX);
+        check(TextSearch, text_search);
         button(Refresh, L"Refresh");
-        button(CopyFiles, L"Copy selected files");
+        button(CopyFiles, L"Copy");
         button(QuickShare, L"Quick Share…");
         make(NextRetry, L"STATIC", L"", SS_NOPREFIX);
         make(Status, L"STATIC", L"", SS_NOPREFIX);
         fonts();
-        theme::apply(window, theme::Caption::red);
+        theme::apply(window);
         theme::set_primary(get(Action));
     }
     void fonts() {
@@ -329,7 +329,8 @@ struct WindowsLibrary::Impl {
         place(History, 156, 67, 108, 30);
         place(Storage, 274, 67, 96, 30);
         place(Duplicates, 380, 67, 150, 30);
-        place(Search, 20, 109, width - 241, 26);
+        place(Search, 20, 109, width - 431, 26);
+        place(TextSearch, width - 401, 109, 182, 26);
         place(NewCaptures, width - 211, 109, 196, 26);
         place(Game, 20, 145, width - 404, 230);
         place(Date, width - 374, 145, 116, 175);
@@ -359,6 +360,7 @@ struct WindowsLibrary::Impl {
         place(VideoSurface, panel_x, 219, panel, preview_height);
         place(Play, panel_x, 226 + preview_height, 67, 27);
         place(Stop, panel_x + 76, 226 + preview_height, 67, 27);
+        place(EditCapture, panel_x + 152, 226 + preview_height, std::min(80, panel - 152), 27);
         place(Tags, panel_x, 256 + preview_height, panel, 27);
         place(Save, panel_x, 286 + preview_height, 96, 27);
         place(Favorite, panel_x + 104, 286 + preview_height, panel - 104, 27);
@@ -366,8 +368,8 @@ struct WindowsLibrary::Impl {
         place(Action, 20, height - 39, 177, 29);
         place(KeepExisting, 207, height - 39, 151, 29);
         place(Refresh, duplicates() ? 368 : 207, height - 39, 86, 29);
-        place(CopyFiles, 303, height - 39, 164, 29);
-        place(QuickShare, 477, height - 39, 140, 29);
+        place(CopyFiles, 303, height - 39, 86, 29);
+        place(QuickShare, 399, height - 39, 140, 29);
         if (player) player->UpdateVideo();
     }
     void stop() {
@@ -394,7 +396,7 @@ struct WindowsLibrary::Impl {
         SendMessageW(get(Game), CB_RESETCONTENT, 0, 0);
         option(Game, L"All games");
         std::map<std::filesystem::path, bool> distinct;
-        if (state.capture_library) for (const auto& item : *state.capture_library) distinct[item.game_folder] = true;
+        if (state.capture_library) for (const auto& item : *state.capture_library) distinct[capture_game(item)] = true;
         games.clear();
         int index = 0;
         for (const auto& [folder, unused] : distinct) {
@@ -584,8 +586,38 @@ struct WindowsLibrary::Impl {
         const auto paths = selected_paths();
         if (paths.empty()) return;
         set(Status, copy_capture_files(window, paths)
-            ? std::to_wstring(paths.size()) + L" files copied. Paste them into a chat or folder."
+            ? (paths.size() == 1 ? L"File copied." : std::to_wstring(paths.size()) + L" files copied.")
             : L"Could not copy the selected files. Refresh if a file has moved.");
+    }
+
+    void capture_menu(LPARAM position) {
+        const HWND list = get(Rows);
+        POINT point{GET_X_LPARAM(position), GET_Y_LPARAM(position)};
+        if (point.x == -1 && point.y == -1) {
+            const int row = ListView_GetNextItem(list, -1, LVNI_FOCUSED | LVNI_SELECTED);
+            RECT bounds{};
+            if (row < 0 || !ListView_GetItemRect(list, row, &bounds, LVIR_LABEL)) return;
+            point = {bounds.left, bounds.bottom};
+            ClientToScreen(list, &point);
+        } else {
+            LVHITTESTINFO hit{};
+            hit.pt = point;
+            ScreenToClient(list, &hit.pt);
+            const int row = ListView_SubItemHitTest(list, &hit);
+            if (row < 0 || !(hit.flags & LVHT_ONITEM)) return;
+            if (!(ListView_GetItemState(list, row, LVIS_SELECTED) & LVIS_SELECTED)) {
+                ListView_SetItemState(list, -1, 0, LVIS_SELECTED);
+                ListView_SetItemState(list, row, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+            }
+        }
+        const auto menu = CreatePopupMenu();
+        if (!menu) return;
+        AppendMenuW(menu, MF_STRING, CopyFiles, L"Copy\tCtrl+C");
+        AppendMenuW(menu, ListView_GetSelectedCount(list) == 1 ? MF_STRING : MF_GRAYED, EditCapture, L"Edit…");
+        AppendMenuW(menu, labels_path.empty() ? MF_GRAYED : MF_STRING, AssignGame, L"Assign game…");
+        const auto command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, point.x, point.y, 0, window, nullptr);
+        DestroyMenu(menu);
+        if (command) SendMessageW(window, WM_COMMAND, command, 0);
     }
 
     void quick_share() {
@@ -651,10 +683,95 @@ struct WindowsLibrary::Impl {
         return items && items->is_array() && index >= 0 && static_cast<std::size_t>(index) < items->as_array().size()
             ? &items->as_array()[index] : nullptr;
     }
-    const Json& annotation(const LocalCapture& capture) const {
+    // Labels are keyed relative to the album so tags, favourites and assigned
+    // games survive moving or renaming the album folder. Files outside the
+    // album keep an absolute key.
+    std::string label_key(const std::filesystem::path& path) const {
+        if (state.destination.empty()) return path_to_utf8(path);
+        const auto relative = path.lexically_normal().lexically_relative(state.destination.lexically_normal());
+        if (relative.empty() || *relative.begin() == L"..") return path_to_utf8(path);
+        return path_to_utf8(relative);
+    }
+    const Json& annotation(const std::filesystem::path& path) const {
         static const Json empty;
-        const auto found = labels.find(path_to_utf8(capture.path));
+        auto found = labels.find(label_key(path));
+        // Older builds used absolute keys; migrate_labels() rewrites them.
+        if (found == labels.end()) found = labels.find(path_to_utf8(path));
         return found == labels.end() ? empty : found->second;
+    }
+    std::filesystem::path capture_game(const LocalCapture& capture) const {
+        const auto game = path_from_utf8(annotation(capture.path).string("game"));
+        if (game.empty()) return capture.game_folder;
+        // Assigned games are stored as the game folder's name in this album.
+        return state.destination / (game.is_absolute() ? game.filename() : game);
+    }
+    void migrate_labels() {
+        if (labels_path.empty() || state.destination.empty()) return;
+        auto next = labels;
+        bool changed = false;
+        for (const auto& [key, value] : labels) {
+            const auto path = path_from_utf8(key);
+            if (!path.is_absolute()) continue;
+            const auto relative = label_key(path);
+            if (relative == key) continue;  // Belongs to a different album.
+            Json migrated = value;
+            if (value.is_object()) {
+                auto fields = value.as_object();
+                if (const auto game = fields.find("game"); game != fields.end() && game->second.is_string()) {
+                    const auto folder = path_from_utf8(game->second.as_string());
+                    if (folder.is_absolute()) game->second = Json(path_to_utf8(folder.filename()));
+                }
+                migrated = Json(std::move(fields));
+            }
+            next.erase(key);
+            next.emplace(relative, std::move(migrated));
+            changed = true;
+        }
+        if (changed && write_local_data(labels_path, Json(next))) labels.swap(next);
+    }
+
+    void assign_game() {
+        const auto paths = selected_paths();
+        if (paths.empty() || labels_path.empty()) return;
+        const auto destination = state.destination;
+        std::set<std::filesystem::path> available;
+        for (const auto& capture : *state.capture_library) {
+            available.insert(capture.game_folder);
+            available.insert(capture_game(capture));
+        }
+        available.erase(destination);
+        const CapturePaths targets(available.begin(), available.end());
+        theme::Dialog dialog;
+        dialog.title = L"Assign game";
+        dialog.heading = L"Assign a game to selected captures";
+        dialog.text = L"Choose an existing game. This updates the library and storage totals without moving files.";
+        dialog.choices = {L"Use detected game"};
+        for (const auto& target : targets) dialog.choices.push_back(game_name(target));
+        dialog.single_choice = true;
+        dialog.buttons = {{IDOK, L"Apply", true}, {IDCANCEL, L"Cancel"}};
+        if (theme::run_dialog(window, dialog) != IDOK || dialog.selected.empty() ||
+            destination != state.destination) return;
+        const auto index = dialog.selected.front();
+        const auto game = index == 0 ? std::string{} : path_to_utf8(targets[index - 1].filename());
+        auto next = labels;
+        for (const auto& path : paths) {
+            const auto& previous = annotation(path);
+            const auto key = label_key(path);
+            auto fields = previous.is_object() ? previous.as_object() : Json::object{};
+            next.erase(path_to_utf8(path));
+            if (game.empty()) fields.erase("game");
+            else fields["game"] = game;
+            if (fields.empty()) next.erase(key);
+            else next[key] = Json(std::move(fields));
+        }
+        if (!write_local_data(labels_path, Json(next))) {
+            set(Status, L"Could not save game assignments. Check access to Switch Album Sync settings.");
+            return;
+        }
+        labels.swap(next);
+        choices();
+        populate(paths);
+        set(Status, L"Game assignment updated for " + std::to_wstring(paths.size()) + L" capture(s).");
     }
     void library_rows() {
         auto query = folded(text_of(get(Search)));
@@ -664,29 +781,233 @@ struct WindowsLibrary::Impl {
         const bool favorites = checked(Favorites);
         const bool new_only = checked(NewCaptures);
         const auto now = unix_now();
+        struct Match {
+            std::size_t index;
+            std::wstring name, game;
+            bool favorite;
+        };
+        std::vector<Match> matches_found;
         if (state.capture_library) for (std::size_t i = 0; i < state.capture_library->size(); ++i) {
             const auto& capture = (*state.capture_library)[i];
             if (!arrivals.empty()) {
                 if (!arrivals.contains(capture.path.lexically_normal())) continue;
             } else if (new_only && capture.added_ms <= previous_visit) continue;
-            const auto& label = annotation(capture);
+            const auto& label = annotation(capture.path);
+            const auto game = capture_game(capture);
             const bool favorite = label.boolean("favorite");
             if (favorites && !favorite) continue;
-            if (!game_filter.empty() && capture.game_folder != game_filter) continue;
+            if (!game_filter.empty() && game != game_filter) continue;
             if ((type == 1 && capture.video) || (type == 2 && !capture.video)) continue;
             if (date == 1 && date_text(now) != date_text(capture.modified)) continue;
             if (date >= 2 && capture.modified < now - (date == 2 ? 7 : 30) * 86400LL) continue;
             const auto name = capture.path.filename().wstring();
-            const auto game_label = game_name(capture.game_folder);
+            const auto game_label = game_name(game);
             const auto tags = wide(label.string("tags"));
-            const auto searchable = tag_only ? tags : name + L" " + game_label + L" " + tags;
-            if (!query.empty() && folded(searchable).find(query) == std::wstring::npos) continue;
-            add_row({favorite ? L"★ " + name : name, game_label, date_text(capture.modified), capture.video ? L"Video" : L"Screenshot"});
-            rows.push_back(i);
+            auto searchable = tag_only ? tags : name + L" " + game_label + L" " + tags;
+            if (!query.empty() && folded(searchable).find(query) == std::wstring::npos) {
+                // Text read from the screenshot, if text search is on.
+                if (tag_only || !text_search || capture.video ||
+                    screenshot_text.text(label_key(capture.path)).find(query) == std::wstring::npos) continue;
+            }
+            matches_found.push_back({i, name, game_label, favorite});
         }
-        set(Status, state.recent_loading ? L"Scanning the album…" : rows.empty() ?
+        if (!state.capture_library) matches_found.clear();
+        static const std::vector<LocalCapture> no_captures;
+        const auto& library_items = state.capture_library ? *state.capture_library : no_captures;
+        std::stable_sort(matches_found.begin(), matches_found.end(), [&](const Match& a, const Match& b) {
+            const auto& left = library_items[a.index];
+            const auto& right = library_items[b.index];
+            int order = 0;
+            switch (sort_column) {
+                case NameColumn: order = CompareStringOrdinal(a.name.c_str(), -1, b.name.c_str(), -1, TRUE) - CSTR_EQUAL; break;
+                case GameColumn: order = CompareStringOrdinal(a.game.c_str(), -1, b.game.c_str(), -1, TRUE) - CSTR_EQUAL; break;
+                case TypeColumn: order = static_cast<int>(left.video) - static_cast<int>(right.video); break;
+                default: break;
+            }
+            if (order == 0) order = left.modified < right.modified ? -1 : left.modified > right.modified ? 1 : 0;
+            return sort_descending ? order > 0 : order < 0;
+        });
+        for (const auto& match : matches_found) {
+            const auto& capture = library_items[match.index];
+            add_row({match.favorite ? L"★ " + match.name : match.name, match.game, date_text(capture.modified),
+                     capture.video ? L"Video" : L"Screenshot"});
+            rows.push_back(match.index);
+        }
+        show_sort_arrow();
+        std::wstring status = state.recent_loading ? L"Scanning the album…" : rows.empty() ?
             (new_only ? L"No new captures match this view." : L"No matching captures. Clear filters or refresh the album.") :
-            std::to_wstring(rows.size()) + L" captures · Ctrl/Shift to select several, then drag or copy.");
+            std::to_wstring(rows.size()) + L" captures · Ctrl/Shift to select several, then drag or copy.";
+        if (text_search && screenshot_text.running()) {
+            status += L" Reading text: " + std::to_wstring(screenshot_text.done()) + L" of " +
+                std::to_wstring(screenshot_text.total()) + L".";
+        } else if (text_search && !screenshot_text.available()) {
+            status += L" Text search needs a Windows text recognition language (Settings → Time & language).";
+        }
+        set(Status, status);
+    }
+
+    // Updates the reading-text progress without rebuilding the list.
+    void library_status_only() {
+        if (!text_search) return;
+        std::wstring status = std::to_wstring(rows.size()) + L" captures.";
+        if (screenshot_text.running()) {
+            status += L" Reading text: " + std::to_wstring(screenshot_text.done()) + L" of " +
+                std::to_wstring(screenshot_text.total()) + L".";
+        } else if (screenshot_text.available()) {
+            status += L" Text in screenshots is ready to search.";
+        } else {
+            status += L" Text search needs a Windows text recognition language (Settings → Time & language).";
+        }
+        set(Status, status);
+    }
+
+    void show_sort_arrow() {
+        const HWND header = ListView_GetHeader(get(Rows));
+        for (int column = 0; column < Header_GetItemCount(header); ++column) {
+            HDITEMW item{};
+            item.mask = HDI_FORMAT;
+            Header_GetItem(header, column, &item);
+            item.fmt &= ~(HDF_SORTUP | HDF_SORTDOWN);
+            if (column == sort_column) item.fmt |= sort_descending ? HDF_SORTDOWN : HDF_SORTUP;
+            Header_SetItem(header, column, &item);
+        }
+    }
+
+    void sort_by(int column) {
+        if (column == sort_column) sort_descending = !sort_descending;
+        else {
+            sort_column = column;
+            sort_descending = column == DateColumn;  // Newest first; names A to Z
+        }
+        populate(selected_paths());
+    }
+
+    std::vector<ScreenshotText::Item> text_items() const {
+        std::vector<ScreenshotText::Item> items;
+        if (state.capture_library) for (const auto& capture : *state.capture_library) {
+            if (!capture.video) items.push_back({label_key(capture.path), capture.path, capture.modified});
+        }
+        return items;
+    }
+
+    void start_text_search() {
+        if (text_search && !state.settings_directory.empty() && state.capture_library) {
+            screenshot_text.start(state.settings_directory / L"capture-text.json", text_items(), window, kTextIndexed);
+        }
+    }
+
+    void toggle_text_search() {
+        const bool enable = checked(TextSearch);
+        if (enable && !preferences.contains("textSearch") &&
+            theme::message_box(window, L"Read the text in your screenshots so search can find it? Windows' built-in text "
+                L"recognition does this on this PC; nothing is uploaded. It runs in the background while the library is open.",
+                L"Text in screenshots", MB_YESNO) != IDYES) {
+            check(TextSearch, false);
+            return;
+        }
+        text_search = enable;
+        auto data = preferences;
+        data["textSearch"] = enable;
+        if (!preferences_path.empty() && write_local_data(preferences_path, data)) preferences.swap(data);
+        if (enable) start_text_search();
+        else screenshot_text.stop();
+        populate(selected_paths());
+    }
+
+    void edit_capture() {
+        if (ListView_GetSelectedCount(get(Rows)) != 1) return;
+        const auto* capture = selected_capture();
+        if (!capture) return;
+        const auto path = capture->path;
+        if (!capture->video) {
+            const auto album = state.destination;
+            const auto* callbacks_now = callbacks;
+            open_screenshot_editor(window, path, [album, callbacks_now](const std::filesystem::path& saved) {
+                // A copy saved into the album appears in the library after a refresh.
+                const auto relative = saved.lexically_relative(album);
+                if (!relative.empty() && *relative.begin() != L".." && callbacks_now && callbacks_now->refresh_captures) {
+                    callbacks_now->refresh_captures();
+                }
+            });
+            return;
+        }
+        stop();
+        const auto info = probe_video(path);
+        if (!info || info->seconds <= 0) {
+            theme::message_box(window, L"This video couldn't be opened.", L"Edit video", MB_OK);
+            return;
+        }
+        wchar_t length[32]{};
+        swprintf_s(length, L"%.1f", info->seconds);
+        theme::Dialog dialog;
+        dialog.title = L"Edit video";
+        dialog.heading = L"Save part of this video";
+        dialog.text = std::wstring(L"The video is ") + length + L" seconds long. Enter where to start and end, in seconds "
+            L"(for example 2.5-10). GIFs can be up to 15 seconds long and have no sound.";
+        dialog.field = true;
+        dialog.field_value = std::wstring(L"0-") + length;
+        dialog.field_cue = L"Start-end in seconds";
+        dialog.single_choice = true;
+        dialog.choices = {L"MP4 clip with sound", L"GIF, 480 pixels wide, 15 frames per second",
+                          L"GIF, 320 pixels wide, 10 frames per second"};
+        dialog.selected = {0};
+        dialog.width = 560;
+        dialog.buttons = {{IDCANCEL, L"Cancel"}, {IDOK, L"Save…", true}};
+        if (theme::run_dialog(window, dialog) != IDOK || dialog.selected.empty()) return;
+        double start = 0, end = 0;
+        auto range = dialog.field_value;
+        std::replace_if(range.begin(), range.end(), [](wchar_t c) { return c == L'-' || c == L'–' || c == L','; }, L' ');
+        if (swscanf_s(range.c_str(), L"%lf %lf", &start, &end) != 2 || start < 0 || end <= start) {
+            theme::message_box(window, L"Enter a start and end time, such as 2.5-10.", L"Edit video", MB_OK);
+            return;
+        }
+        end = std::min(end, info->seconds);
+        const int format = dialog.selected.front();
+        const bool gif = format != 0;
+        if (gif && end - start > kMaxGifSeconds) {
+            theme::message_box(window, L"GIFs can be up to 15 seconds long. Choose a shorter part.", L"Edit video", MB_OK);
+            return;
+        }
+        const auto suggested = path.parent_path() / (path.stem().wstring() + (gif ? L"_clip.gif" : L"_clip.mp4"));
+        const auto output = pick_save_file(window, L"Save the clip", suggested,
+            gif ? L"GIF animation" : L"MP4 video", gif ? L"*.gif" : L"*.mp4");
+        if (output.empty()) return;
+        std::error_code error;
+        if (std::filesystem::equivalent(output, path, error)) {
+            theme::message_box(window, L"Choose a different name; the original is never replaced.", L"Edit video", MB_OK);
+            return;
+        }
+        try {
+            const bool finished = run_with_progress(window, L"Edit video", gif ? L"Making the GIF…" : L"Saving the clip…",
+                [&](const std::atomic<bool>& cancelled) {
+                    if (gif) export_video_gif(path, output, start, end, format == 1 ? 480 : 320, format == 1 ? 15 : 10, cancelled);
+                    else export_video_clip(path, output, start, end, cancelled);
+                });
+            if (!finished) return;
+        } catch (const std::exception& failure) {
+            theme::message_box(window, L"Could not save the clip. " + wide(failure.what()), L"Edit video", MB_OK);
+            return;
+        }
+        if (theme::message_box(window, L"Saved " + output.filename().wstring() + L". Open it now?", L"Edit video",
+                MB_YESNO) == IDYES) open_path(output);
+        if (!gif && callbacks && callbacks->refresh_captures) callbacks->refresh_captures();
+    }
+
+    void load_saved_data() {
+        labels.clear();
+        preferences.clear();
+        collections.clear();
+        if (state.settings_directory.empty()) return;
+        labels_path = state.settings_directory / L"capture-labels.json";
+        const auto data = read_local_data(labels_path);
+        if (data.is_object()) labels = data.as_object();
+        preferences_path = state.settings_directory / L"capture-library.json";
+        const auto saved = read_local_data(preferences_path);
+        if (saved.is_object()) preferences = saved.as_object();
+        if (const auto* stored = saved.find("collections"); stored && stored->is_object()) collections = stored->as_object();
+        text_search = saved.boolean("textSearch");
+        if (window) check(TextSearch, text_search);
+        migrate_labels();
     }
 
     void duplicate_rows() {
@@ -714,7 +1035,7 @@ struct WindowsLibrary::Impl {
         std::map<std::filesystem::path, Usage> games_usage;
         Usage total;
         if (state.capture_library) for (const auto& capture : *state.capture_library) {
-            auto& usage = games_usage[capture.game_folder];
+            auto& usage = games_usage[capture_game(capture)];
             if (capture.video) {
                 usage.videos += capture.bytes;
                 total.videos += capture.bytes;
@@ -798,11 +1119,11 @@ struct WindowsLibrary::Impl {
         enable(CopyFiles, selected > 0);
         enable(QuickShare, selected > 0 && !share_export.valid());
         if (selected > 1) capture = nullptr;
-        for (const auto id : {Action, Tags, Save, Favorite}) enable(id, capture != nullptr);
+        for (const auto id : {Action, Tags, Save, Favorite, EditCapture}) enable(id, capture != nullptr);
         enable(Play, capture && capture->video);
         enable(Stop, false);
-        set(Tags, capture ? wide(annotation(*capture).string("tags")) : L"");
-        set(Favorite, capture && annotation(*capture).boolean("favorite") ? L"Remove favorite" : L"Add favorite");
+        set(Tags, capture ? wide(annotation(capture->path).string("tags")) : L"");
+        set(Favorite, capture && annotation(capture->path).boolean("favorite") ? L"Remove favorite" : L"Add favorite");
         if (capture && !capture->video && imaging.token) {
             image = std::make_unique<Gdiplus::Image>(capture->path.c_str());
             if (image->GetLastStatus() != Gdiplus::Ok || !image->GetWidth() || !image->GetHeight()) image.reset();
@@ -813,13 +1134,19 @@ struct WindowsLibrary::Impl {
         if (ListView_GetSelectedCount(get(Rows)) != 1) return;
         const auto* capture = selected_capture();
         if (!capture || labels_path.empty()) return;
-        const auto key = path_to_utf8(capture->path);
-        const auto& previous = annotation(*capture);
+        const auto key = label_key(capture->path);
+        const auto& previous = annotation(capture->path);
         const bool favorite = previous.boolean("favorite") != toggle;
         const auto tags = toggle ? previous.string("tags") : utf8(text_of(get(Tags)));
         auto next = labels;
-        if (favorite || !tags.empty()) next[key] = Json::object{{"favorite", favorite}, {"tags", tags}};
-        else next.erase(key);
+        auto fields = previous.is_object() ? previous.as_object() : Json::object{};
+        next.erase(path_to_utf8(capture->path));
+        if (favorite) fields["favorite"] = true;
+        else fields.erase("favorite");
+        if (!tags.empty()) fields["tags"] = tags;
+        else fields.erase("tags");
+        if (fields.empty()) next.erase(key);
+        else next[key] = Json(std::move(fields));
         if (!write_local_data(labels_path, Json(next))) {
             set(Status, L"Could not save labels. Check access to Switch Album Sync settings.");
             return;
@@ -890,12 +1217,13 @@ struct WindowsLibrary::Impl {
 
     void draw_preview(const DRAWITEMSTRUCT& draw) {
         RECT bounds = draw.rcItem;
-        FillRect(draw.hDC, &bounds, ink);
+        const bool contrast = high_contrast();
+        FillRect(draw.hDC, &bounds, contrast ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kPreview));
         const auto& still = draw.CtlID == IncomingPreview ? incoming_image : image;
         if (!still) {
             const auto* capture = selected_capture();
             SetBkMode(draw.hDC, TRANSPARENT);
-            SetTextColor(draw.hDC, RGB(230, 231, 233));
+            SetTextColor(draw.hDC, contrast ? GetSysColor(COLOR_WINDOWTEXT) : RGB(230, 231, 233));
             const auto* caption = duplicates() ? (selected_match() ? L"Open file to view" : L"Select a match") :
                 ListView_GetSelectedCount(get(Rows)) > 1 ? L"Multiple captures selected" :
                 !capture ? L"Select a capture" : capture->video ? L"Press Play to preview" : L"Preview unavailable";
@@ -919,7 +1247,8 @@ struct WindowsLibrary::Impl {
         const auto row_style = GetWindowLongPtrW(get(Rows), GWL_STYLE);
         SetWindowLongPtrW(get(Rows), GWL_STYLE, library() ? row_style & ~LVS_SINGLESEL : row_style | LVS_SINGLESEL);
         for (auto id : {Search, NewCaptures, Game, Date, Type, Favorites, Collections, CollectionName,
-                       SaveCollection, DeleteCollection, ClearFilters, Tags, Save, Favorite, Play, Stop, CopyFiles, QuickShare}) show(id, library());
+                       SaveCollection, DeleteCollection, ClearFilters, Tags, Save, Favorite, Play, Stop, CopyFiles, QuickShare,
+                       EditCapture, TextSearch}) show(id, library());
         for (auto id : {ExistingLabel, IncomingLabel, IncomingPreview, OpenExisting, OpenIncoming, KeepExisting}) show(id, duplicates());
         show(Preview, library() || duplicates());
         show(Runs, history());
@@ -984,12 +1313,12 @@ struct WindowsLibrary::Impl {
                 RECT bounds{};
                 GetClientRect(window, &bounds);
                 const auto dc = reinterpret_cast<HDC>(wp);
-                FillRect(dc, &bounds, high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : paper);
+                FillRect(dc, &bounds, high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::palette().background));
                 if (!high_contrast()) {
                     bounds.bottom = px(60);
-                    FillRect(dc, &bounds, theme::brush(theme::kCard));
-                    const RECT accent{px(20), px(56), px(62), px(58)};
-                    FillRect(dc, &accent, red);
+                    FillRect(dc, &bounds, theme::brush(theme::palette().card));
+                    const RECT accent{px(20), px(56), px(52), px(59)};
+                    theme::fill_round(dc, accent, px(1), theme::palette().accent);
                 }
                 return TRUE;
             }
@@ -1003,17 +1332,17 @@ struct WindowsLibrary::Impl {
                 }
                 if (child == get(Title)) {
                     SetBkMode(dc, TRANSPARENT);
-                    SetTextColor(dc, theme::kText);
-                    return reinterpret_cast<LRESULT>(theme::brush(theme::kCard));
+                    SetTextColor(dc, theme::palette().text);
+                    return reinterpret_cast<LRESULT>(theme::brush(theme::palette().card));
                 }
-                const auto result = theme::control_color(msg, wp, lp, theme::kBackground);
-                if (child == get(Status)) SetTextColor(dc, theme::kMuted);
+                const auto result = theme::control_color(msg, wp, lp, theme::palette().background);
+                if (child == get(Status)) SetTextColor(dc, theme::palette().muted);
                 return result;
             }
             case WM_CTLCOLORBTN:
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
-                if (const auto brush = theme::control_color(msg, wp, lp, theme::kBackground)) return brush;
+                if (const auto brush = theme::control_color(msg, wp, lp, theme::palette().background)) return brush;
                 break;
             case WM_DRAWITEM:
                 if (wp == Preview || wp == IncomingPreview) {
@@ -1029,8 +1358,21 @@ struct WindowsLibrary::Impl {
                 incoming_image.reset();
                 ShowWindow(window, SW_HIDE);
                 return 0;
+            case WM_CONTEXTMENU:
+                if (library() && reinterpret_cast<HWND>(wp) == get(Rows)) {
+                    capture_menu(lp);
+                    return 0;
+                }
+                break;
             case kApplySelection:
                 if (selection_pending) selection();
+                return 0;
+            case kTextIndexed:
+                // New text is searchable now; refresh results if a search is active.
+                if (library() && IsWindowVisible(window)) {
+                    if (!text_of(get(Search)).empty()) populate(selected_paths());
+                    else library_status_only();
+                }
                 return 0;
             case WM_TIMER:
                 if (wp == 2) { finish_share(); return 0; }
@@ -1070,6 +1412,9 @@ struct WindowsLibrary::Impl {
                     case ClearFilters: clear_filters(); break;
                     case QuickShare: quick_share(); break;
                     case CopyFiles: copy_selected(); break;
+                    case AssignGame: assign_game(); break;
+                    case EditCapture: edit_capture(); break;
+                    case TextSearch: toggle_text_search(); break;
                     case OpenExisting: case OpenIncoming:
                         if (const auto* match = selected_match()) {
                             open_path(LOWORD(wp) == OpenExisting ? match->existing : match->incoming);
@@ -1097,10 +1442,12 @@ struct WindowsLibrary::Impl {
                         if (((change->uOldState ^ change->uNewState) & LVIS_SELECTED) && !selection_pending) {
                             selection_pending = PostMessageW(window, kApplySelection, 0, 0) != FALSE;
                         }
+                    } else if (notice->code == LVN_COLUMNCLICK && library()) {
+                        sort_by(reinterpret_cast<const NMLISTVIEW*>(lp)->iSubItem);
                     } else if (notice->code == LVN_BEGINDRAG && library()) {
                         const auto paths = selected_paths();
                         if (!paths.empty() && !drag_capture_files(window, paths)) {
-                            set(Status, L"Could not drag the files. Try Copy selected files.");
+                            set(Status, L"Could not drag the files. Try Copy.");
                         }
                     } else if (notice->code == NM_DBLCLK || notice->code == NM_RETURN) {
                         if (duplicates()) {
@@ -1134,19 +1481,20 @@ struct WindowsLibrary::Impl {
 WindowsLibrary::WindowsLibrary() : impl_(std::make_unique<Impl>()) {}
 WindowsLibrary::~WindowsLibrary() = default;
 
+void WindowsLibrary::reload_saved_data() {
+    if (impl_->labels_path.empty()) return;  // Not loaded yet; the next show() reads fresh data.
+    impl_->load_saved_data();
+    if (!impl_->window) return;
+    impl_->updating = true;
+    impl_->collection_choices();
+    impl_->choices();
+    impl_->updating = false;
+    impl_->populate(impl_->selected_paths());
+}
+
 void WindowsLibrary::show(HWND owner, LibraryPage page, const PlatformCallbacks& callbacks) {
     impl_->callbacks = &callbacks;
-    if (impl_->labels_path.empty() && !impl_->state.settings_directory.empty()) {
-        impl_->labels_path = impl_->state.settings_directory / L"capture-labels.json";
-        const auto data = read_local_data(impl_->labels_path);
-        if (data.is_object()) impl_->labels = data.as_object();
-        impl_->preferences_path = impl_->state.settings_directory / L"capture-library.json";
-        const auto preferences = read_local_data(impl_->preferences_path);
-        if (preferences.is_object()) impl_->preferences = preferences.as_object();
-        if (const auto* collections = preferences.find("collections"); collections && collections->is_object()) {
-            impl_->collections = collections->as_object();
-        }
-    }
+    if (impl_->labels_path.empty()) impl_->load_saved_data();
     if (!impl_->window) {
         const auto instance = GetModuleHandleW(nullptr);
         WNDCLASSW type{};
@@ -1171,6 +1519,7 @@ void WindowsLibrary::show(HWND owner, LibraryPage page, const PlatformCallbacks&
     }
     ShowWindow(impl_->window, SW_SHOW);
     impl_->switch_page(page);
+    if (impl_->text_search && !impl_->screenshot_text.running()) impl_->start_text_search();
     SetForegroundWindow(impl_->window);
 }
 
@@ -1207,7 +1556,10 @@ void WindowsLibrary::update(const MenuState& state) {
     const auto previous = impl_->window && album ? impl_->selected_paths() : CapturePaths{};
     impl_->state = state;
     if (!impl_->window) return;
+    // Read text in new or changed screenshots while the library is open.
+    if (album && impl_->text_search && IsWindowVisible(impl_->window)) impl_->start_text_search();
     if (destination) {
+        impl_->migrate_labels();
         impl_->visited_album.clear();
         impl_->clear_arrivals();
         impl_->game_filter.clear();

@@ -34,16 +34,6 @@ public:
         const std::string& na_id,
         const std::string& coral_user_id);
 
-    std::vector<unsigned char> encrypted_login_body(
-        const std::string& id_token,
-        const UserProfile& profile);
-
-    std::vector<unsigned char> encrypted_web_service_token_body(
-        const std::string& coral_access_token,
-        const std::string& na_id,
-        const std::string& coral_user_id,
-        std::uint64_t game_service_id);
-
     std::vector<unsigned char> encrypt_request(
         const std::string& url,
         const std::string& coral_token,

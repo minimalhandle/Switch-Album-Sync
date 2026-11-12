@@ -6,7 +6,6 @@
 
 namespace nso {
 
-inline constexpr char kNintendoAuthScheme[] = "npf71b963c1b7b6d119";
 inline constexpr char kNintendoAuthCallbackPrefix[] = "npf71b963c1b7b6d119://auth";
 
 // Private per-user runtime directory used for short-lived callback IPC and the

@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     SwitchAlbumSync
-    VERSION 1.0.0
+    VERSION 1.1.0
     LANGUAGES CXX
 )
 
@@ -32,6 +32,31 @@ set(
     CACHE PATH
     "Extracted Discord Social SDK root"
 )
+# nxapi-znca-api's public API terms require a separate client for development.
+# Builds default to the development client; build-release.ps1 passes the release
+# client. If you build your own copy, register your own client at
+# https://nxapi-auth.fancy.org.uk/oauth/clients and pass its ID here.
+set(
+    NSO_NXAPI_AUTH_CLIENT_ID
+    "9F_ul8eygxiLn9N0uCaPeA"
+    CACHE STRING
+    "nxapi-auth OAuth client ID (Switch Album Sync development client by default)"
+)
+# Sent as X-znca-Client-Version; must be fixed, never set at runtime. nxapi now
+# rejects 3.0.x values for current Nintendo Switch Online versions
+# (incompatible_client), and nxapi-auth doesn't yet issue per-client values.
+# Development and test builds use the compatibility value nxapi's own client
+# publishes (ZNCA_API_COMPATIBILITY_VERSION in nxapi src/api/coral.ts).
+# Release builds must use a value nxapi has confirmed for the release client.
+set(
+    NSO_ZNCA_CLIENT_VERSION
+    "d8fAZDPzwimzQ7c6"
+    CACHE STRING
+    "Fixed X-znca-Client-Version value for nxapi-znca-api"
+)
+if(NSO_NXAPI_AUTH_CLIENT_ID STREQUAL "" OR NSO_ZNCA_CLIENT_VERSION STREQUAL "")
+    message(FATAL_ERROR "NSO_NXAPI_AUTH_CLIENT_ID and NSO_ZNCA_CLIENT_VERSION must not be empty")
+endif()
 
 if(MSVC)
     add_compile_options(/W4 /EHsc /utf-8)
@@ -109,6 +134,7 @@ set(NSO_SOURCES
     src/local_data.cpp
     src/nintendo_auth.cpp
     src/nxapi.cpp
+    src/rpc_enricher.cpp
     src/splatnet.cpp
     src/sync.cpp
     src/util.cpp
@@ -117,7 +143,10 @@ set(NSO_SOURCES
 )
 
 set(NSO_HEADERS
+    include/nso_album_sync/appearance.hpp
     include/nso_album_sync/app.hpp
+    include/nso_album_sync/auto_sync_policy.hpp
+    include/nso_album_sync/backup.hpp
     include/nso_album_sync/auth_callback.hpp
     include/nso_album_sync/config.hpp
     include/nso_album_sync/coral.hpp
@@ -129,10 +158,14 @@ set(NSO_HEADERS
     include/nso_album_sync/nintendo_auth.hpp
     include/nso_album_sync/nxapi.hpp
     include/nso_album_sync/platform.hpp
+    include/nso_album_sync/rpc.hpp
+    include/nso_album_sync/rpc_enricher.hpp
+    include/nso_album_sync/rpc_settings.hpp
     include/nso_album_sync/secure_store.hpp
     include/nso_album_sync/splatnet.hpp
     include/nso_album_sync/sync.hpp
     include/nso_album_sync/util.hpp
+    include/nso_album_sync/version.hpp
     include/nso_album_sync/zeldanotes.hpp
     include/nso_album_sync/zeldanotes_regions.hpp
 )
@@ -146,6 +179,13 @@ configure_file(
 set_source_files_properties(
     "${CMAKE_CURRENT_BINARY_DIR}/SwitchAlbumSync.rc"
     PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/app.ico"
+)
+# Listing a .manifest as a source makes the MSVC linker merge it into the
+# manifest it generates (Common Controls v6, DPI awareness, supported OS).
+configure_file(
+    "${CMAKE_SOURCE_DIR}/resources/windows/app.manifest.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/SwitchAlbumSync.manifest"
+    @ONLY
 )
 
 # Keep the Windows release as one .exe. Embed the notices and, for builds
@@ -161,8 +201,14 @@ if(NSO_ENABLE_DISCORD)
 endif()
 
 list(APPEND NSO_SOURCES
+    src/album_tools_windows.cpp
+    src/annotate_windows.cpp
     src/auth_callback_windows.cpp
+    src/backup_windows.cpp
     src/dashboard_windows.cpp
+    src/system_status_windows.cpp
+    src/text_search_windows.cpp
+    src/video_windows.cpp
     src/library_windows.cpp
     src/import_windows.cpp
     src/share_windows.cpp
@@ -171,6 +217,7 @@ list(APPEND NSO_SOURCES
     src/platform_windows.cpp
     src/secure_store_windows.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/SwitchAlbumSync.rc"
+    "${CMAKE_CURRENT_BINARY_DIR}/SwitchAlbumSync.manifest"
     "${NSO_EMBEDDED_RESOURCES_RC}"
 )
 
@@ -182,6 +229,8 @@ target_compile_definitions(
     SwitchAlbumSync
     PRIVATE
         NSO_APP_VERSION="${PROJECT_VERSION}"
+        NSO_NXAPI_AUTH_CLIENT_ID="${NSO_NXAPI_AUTH_CLIENT_ID}"
+        NSO_ZNCA_CLIENT_VERSION="${NSO_ZNCA_CLIENT_VERSION}"
         NSO_ENABLE_DISCORD=$<BOOL:${NSO_ENABLE_DISCORD}>
         NSO_THIRD_PARTY_NOTICES_RESOURCE_ID=${NSO_THIRD_PARTY_NOTICES_RESOURCE_ID}
 )
@@ -211,7 +260,12 @@ endif()
 target_link_libraries(
     SwitchAlbumSync
     PRIVATE advapi32 bcrypt crypt32 winhttp shell32 ole32 comdlg32 comctl32 gdi32 uuid gdiplus dwmapi uxtheme mfplat mfplay mfuuid
+            mfreadwrite windowscodecs windowsapp
 )
+# C++/WinRT (Windows' on-device text recognition) needs large object files.
+if(MSVC)
+    set_source_files_properties(src/text_search_windows.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
 
 install(TARGETS SwitchAlbumSync RUNTIME DESTINATION bin)
 
@@ -228,5 +282,21 @@ if(NSO_BUILD_TESTS)
         endif()
     endforeach()
     target_include_directories(WindowsFeatureTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    # The HTTP regression test runs a loopback server.
+    target_link_libraries(WindowsFeatureTests PRIVATE ws2_32)
     add_test(NAME WindowsCaptureFeatures COMMAND WindowsFeatureTests)
+
+    # Runs the real API clients against a loopback mock of Nintendo and nxapi
+    # that checks the nxapi-znca-api public API terms. For a long run with a
+    # report: ApiUsageTests --soak 600 --report <dir>
+    add_executable(ApiUsageTests tests/api_usage.cpp tests/mock_nintendo_api.hpp ${NSO_TEST_SOURCES})
+    foreach(property INCLUDE_DIRECTORIES COMPILE_DEFINITIONS LINK_LIBRARIES LINK_OPTIONS)
+        get_target_property(value SwitchAlbumSync ${property})
+        if(value)
+            set_property(TARGET ApiUsageTests PROPERTY ${property} "${value}")
+        endif()
+    endforeach()
+    target_include_directories(ApiUsageTests PRIVATE "${CMAKE_SOURCE_DIR}/src")
+    target_link_libraries(ApiUsageTests PRIVATE ws2_32)
+    add_test(NAME ApiUsageCompliance COMMAND ApiUsageTests)
 endif()

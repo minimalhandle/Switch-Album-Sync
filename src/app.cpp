@@ -1,11 +1,14 @@
 #include "nso_album_sync/app.hpp"
 #include "import_windows.hpp"
+#include "nso_album_sync/auto_sync_policy.hpp"
+#include "nso_album_sync/backup.hpp"
 #include "nso_album_sync/local_data.hpp"
 #include "nso_album_sync/path.hpp"
 #include "nso_album_sync/rpc.hpp"
 
 #include "nso_album_sync/auth_callback.hpp"
 #include "nso_album_sync/util.hpp"
+#include "nso_album_sync/version.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -20,25 +23,51 @@
 namespace nso {
 namespace {
 
-constexpr auto kPresencePollInterval = std::chrono::seconds(60);
 constexpr auto kAuthCallbackPollInterval = std::chrono::milliseconds(150);
 constexpr auto kExitWatchdogDelay = std::chrono::seconds(5);
+// While Rich Presence is on but no Discord client is running, check for one
+// locally at this cadence instead of asking Nintendo for presence.
+constexpr auto kDiscordClientCheckInterval = std::chrono::seconds(30);
 constexpr std::int64_t kPollingJitterDivisor = 50;  // +/- 2%
 
+// platform_windows.cpp shows this title with the nxapi project links.
 constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
 constexpr char kManualSignInInstructions[] =
     "Right-click ‘Select this account’ on Nintendo’s page, copy its link address, then paste it below.";
-constexpr char kNxapiDisclosure[] =
-    "Switch Album Sync uses the third-party nxapi-znca-api service at "
-    "fancy.org.uk for Nintendo Switch Online request attestation and "
-    "request/response encryption.\n\n"
-    "When Nintendo Switch Online features are used, your Nintendo Account "
-    "id_token and the profile fields required by Coral (Nintendo Account ID, "
-    "birthday, country, and language), your Coral access token, and the Coral "
-    "API requests and responses used by this app are sent to and processed by "
-    "that third-party service. These tokens can authenticate Nintendo services "
-    "while they remain valid.\n\n"
-    "Continue with Nintendo Account sign-in?";
+constexpr char kNxapiDisclosureBody[] =
+    "Switch Album Sync uses nxapi-znca-api, a third-party service run by the nxapi "
+    "project (nxapi-znca-api.fancy.org.uk, with nxapi-auth.fancy.org.uk), to sign, "
+    "encrypt and decrypt Nintendo Switch Online requests.\n\n"
+    "While you use Nintendo Switch Online features, your Nintendo Account id_token "
+    "and the account details it carries (Nintendo Account ID, birthday, country and "
+    "language), your Coral access token, and every Coral API request and response "
+    "this app makes are sent to and processed by that service. These tokens can "
+    "access Nintendo services while they remain valid. Your long-term Nintendo "
+    "sign-in stays on this PC.\n\n"
+    "Discord Rich Presence is optional and off until you turn it on. It shares the "
+    "game you're playing with Discord and asks before it starts.\n\n"
+    "Local imports, folder watching and the capture library don't use these services.";
+constexpr char kNxapiSignInQuestion[] = "\n\nContinue with Nintendo Account sign-in?";
+constexpr char kNxapiSignedInQuestion[] =
+    "\n\nYou're already signed in. Continue to keep using Nintendo Switch Online "
+    "features, or cancel to sign out.";
+
+constexpr char kDiscordDisclosureTitle[] = "Turn on Discord Rich Presence?";
+constexpr char kDiscordDisclosureEnabledTitle[] = "Discord Rich Presence";
+constexpr char kDiscordDisclosureBody[] =
+    "Rich Presence shows what you're playing on your Discord profile. While it's on, "
+    "Switch Album Sync checks your Nintendo Switch Online status and sends the "
+    "Discord app on this PC:\n\n"
+    "• the game you're playing and which console\n"
+    "• your Nintendo Switch username, profile picture and play time, unless you turn "
+    "them off in Rich Presence settings\n"
+    "• details for games you've enabled: Splatoon rank and weapon, Animal Crossing "
+    "island and resident, Zelda Notes location\n\n"
+    "Discord shows this to people who can see your activity and loads the images "
+    "from Nintendo and splatoon3.ink. Game details come from Nintendo's game "
+    "services, reached through nxapi like other Nintendo Switch Online requests.";
+constexpr char kDiscordTurnOnQuestion[] = "\n\nTurn on Rich Presence?";
+constexpr char kDiscordKeepOnQuestion[] = "\n\nRich Presence is already on. Keep it on?";
 
 std::chrono::milliseconds jittered_interval(std::chrono::milliseconds nominal) {
     const auto nominal_ms = std::max<std::int64_t>(1, nominal.count());
@@ -120,12 +149,13 @@ App::App()
     : auth_(http_),
       nxapi_(
           http_,
-          config_.snapshot().nxapi_auth_client_id,
+          NSO_NXAPI_AUTH_CLIENT_ID,
           config_.directory() / "nxapi-cache.json"),
-      coral_(http_, auth_, nxapi_, config_.directory()),
+      coral_(http_, auth_, nxapi_),
       splatnet_(http_),
       zeldanotes_(http_),
       game_services_(http_),
+      rpc_enricher_(coral_, auth_, splatnet_, zeldanotes_, game_services_),
       sync_(config_, coral_, http_),
       discord_(config_.snapshot().discord_application_id) {
     const auto config = config_.snapshot();
@@ -189,6 +219,7 @@ void App::update_menu() {
     menu.manual_sign_in = menu.sign_in_pending && manual_sign_in_;
     menu.destination = album_directory(path_from_utf8(config.destination_folder));
     menu.watching_folder = !config.watch_folder.empty();
+    menu.backup_folder = path_from_utf8(config.backup_folder);
     std::error_code path_error;
     const auto absolute_destination = std::filesystem::absolute(menu.destination, path_error);
     if (!path_error) menu.destination = absolute_destination.lexically_normal().make_preferred();
@@ -215,15 +246,14 @@ void App::update_menu() {
             menu.next_sync = local_time_text(next_sync_);
         }
         // Only application-generated codes, flags, and counts belong here.
-        menu.diagnostics = "Switch Album Sync"
-#ifdef NSO_APP_VERSION
-            " " NSO_APP_VERSION
-#endif
+        menu.diagnostics = "Switch Album Sync " NSO_APP_VERSION
+            "\nnxapi client: " NSO_NXAPI_AUTH_CLIENT_ID
             "\nSigned in: ";
         menu.diagnostics += menu.signed_in ? "yes\n" : "no\n";
         menu.diagnostics += config.auto_sync ? "Auto-sync: on\n" : "Auto-sync: off\n";
         menu.diagnostics += discord_available ? "Discord support: yes\n" : "Discord support: no\n";
         menu.diagnostics += "Latest event: " + diagnostic_code_ + "\n";
+        if (!last_error_.empty()) menu.diagnostics += "Latest error: " + last_error_ + "\n";
         menu.diagnostics += "Latest sync: " + sync_counts(
             sync_progress_.new_downloads, sync_progress_.skipped, sync_progress_.failed) + "\n";
     }
@@ -233,6 +263,7 @@ void App::update_menu() {
     menu.discord = presence_enabled(config);
     menu.rpc = config.rpc;
     menu.start_on_boot = start_on_boot_enabled();
+    menu.appearance = config.appearance;
     {
         std::lock_guard lock(sync_queue_mutex_);
         menu.sync_busy = sync_request_ != SyncRequest::none || sync_running_;
@@ -357,9 +388,14 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
             }
             update_menu();
         }, retry_ids);
-    } catch (const std::exception&) {
+    } catch (const std::exception& error) {
         result.failure = SyncFailure::service;
         result.fatal = true;
+        result.error_detail = error.what();
+    }
+    if (!result.error_detail.empty()) {
+        std::lock_guard state_lock(state_mutex_);
+        last_error_ = "Sync: " + result.error_detail.substr(0, 200);
     }
     if (cancelled()) return;
     {
@@ -479,6 +515,7 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         }
     }
 
+    if (result.new_downloads > 0) backup_pending_ = true;
     if (notifications && !notification.empty() && !cancelled()) {
         if (!result.downloaded_paths.empty()) {
             ui_.notify_captures("Switch Album Sync", notification + " Click to view new captures.",
@@ -491,11 +528,27 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
 
 bool App::queue_sync(SyncRequest request, const std::string& capture, const std::string& scope,
                      std::shared_ptr<const ImportPlan> import) {
+    // Quieter auto-sync: skip this scheduled check entirely (it is not saved
+    // up for later), so these options only ever reduce Nintendo requests.
+    if (request == SyncRequest::automatic) {
+        const auto reason = auto_sync_pause_reason(
+            config_.snapshot(), battery_saver_on(), metered_connection(), local_hour_now());
+        if (!reason.empty()) {
+            {
+                std::lock_guard state_lock(state_mutex_);
+                status_ = "Auto-sync skipped because " + reason + ".";
+                diagnostic_code_ = "auto_sync_paused";
+            }
+            update_menu();
+            return false;
+        }
+    }
+    const bool local_only = request == SyncRequest::local_import || request == SyncRequest::backup;
     {
         std::lock_guard context_lock(sync_context_mutex_);
         std::lock_guard queue_lock(sync_queue_mutex_);
         if (stopping_ || sync_request_ != SyncRequest::none || sync_running_ ||
-            (request != SyncRequest::local_import && config_.snapshot().session_token.empty())) {
+            (!local_only && config_.snapshot().session_token.empty())) {
             return false;
         }
         std::lock_guard state_lock(state_mutex_);
@@ -506,7 +559,8 @@ bool App::queue_sync(SyncRequest request, const std::string& capture, const std:
         requested_scope_ = scope;
         requested_import_ = std::move(import);
         sync_request_ = request;
-        status_ = request == SyncRequest::local_import ? "Import queued…" : "Sync queued…";
+        status_ = request == SyncRequest::local_import ? "Import queued…" :
+            request == SyncRequest::backup ? "Backup queued…" : "Sync queued…";
         sync_progress_ = {};
         sync_detail_.clear();
         diagnostic_code_ = "sync_queued";
@@ -625,6 +679,7 @@ void App::sync_loop() {
                 if (completed.size() != plan.captures.size()) {
                     next_watch = Clock::now() + std::chrono::seconds(30);
                 }
+                if (backup_pending_) run_backup(false);
             } catch (const std::exception&) {
                 next_watch = Clock::now() + std::chrono::seconds(30);
             }
@@ -640,8 +695,10 @@ void App::sync_loop() {
             continue;
         }
         if (request == SyncRequest::local_import && import) import_captures(*import);
+        else if (request == SyncRequest::backup) run_backup(true);
         else
             sync_now(request, capture, scope);
+        if (backup_pending_) run_backup(false);
         {
             std::lock_guard lock(sync_queue_mutex_);
             sync_running_ = false;
@@ -675,6 +732,7 @@ std::vector<std::filesystem::path> App::import_captures(const ImportPlan& plan) 
         detail = std::to_string(result.copied) + " imported, " + std::to_string(result.skipped) +
             " skipped, " + std::to_string(result.failed) + " failed";
         if (result.review) detail += ", " + std::to_string(result.review) + " ready in Duplicate review";
+        if (result.copied > 0) backup_pending_ = true;
         copied_paths = std::move(result.copied_paths);
         completed_sources = std::move(result.completed_sources);
     } catch (const std::exception&) {
@@ -692,6 +750,55 @@ std::vector<std::filesystem::path> App::import_captures(const ImportPlan& plan) 
     }
     queue_recent_refresh();
     return completed_sources;
+}
+
+void App::run_backup(bool announce) {
+    backup_pending_ = false;
+    const auto config = config_.snapshot();
+    if (config.backup_folder.empty()) return;
+    const auto generation = destination_generation_.load();
+    const auto album = album_directory(path_from_utf8(config.destination_folder));
+    if (announce) {
+        {
+            std::lock_guard lock(state_mutex_);
+            status_ = "Backing up captures…";
+            sync_detail_.clear();
+            diagnostic_code_ = "backing_up";
+        }
+        update_menu();
+    }
+    BackupResult result;
+    bool failed = false;
+    try {
+        result = backup_album(album, path_from_utf8(config.backup_folder), [this, generation] {
+            return stopping_.load() || destination_generation_.load() != generation;
+        });
+    } catch (const std::exception&) {
+        failed = true;
+    }
+    std::string message;
+    {
+        std::lock_guard lock(state_mutex_);
+        if (failed) {
+            message = "Could not back up. Check that the backup folder is available.";
+        } else if (result.failed > 0) {
+            message = "Backup finished, but " + std::to_string(result.failed) + " captures couldn't be copied.";
+        } else if (announce) {
+            message = result.copied > 0
+                ? "Backed up " + std::to_string(result.copied) + " new or changed captures."
+                : "Backup is up to date.";
+        }
+        if (announce || failed || result.failed > 0) {
+            status_ = message;
+            diagnostic_code_ = failed || result.failed ? "backup_failed" : "backup_complete";
+        } else if (result.copied > 0) {
+            // After a sync or import, keep its result and note the backup.
+            if (!sync_detail_.empty()) sync_detail_ += ", ";
+            sync_detail_ += std::to_string(result.copied) + " backed up";
+        }
+    }
+    update_menu();
+    if (announce && !message.empty() && config.notifications) ui_.notify("Switch Album Sync", message);
 }
 
 void App::complete_pending_login(const std::string& redirect_url_or_code) {
@@ -798,7 +905,8 @@ void App::sign_in_or_out() {
         return;
     }
 
-    if (!ui_.confirm(kNxapiDisclosureTitle, kNxapiDisclosure)) {
+    if (!ui_.confirm(kNxapiDisclosureTitle,
+            std::string(kNxapiDisclosureBody) + kNxapiSignInQuestion)) {
         {
             std::lock_guard state_lock(state_mutex_);
             status_ = "Sign-in cancelled";
@@ -806,6 +914,14 @@ void App::sign_in_or_out() {
         }
         update_menu();
         return;
+    }
+    // Record the explicit acknowledgement the nxapi terms require. If the
+    // settings file can't be written, the user is simply asked again next launch.
+    try {
+        config_.update([](AppConfig& value) {
+            value.nxapi_disclosure_acknowledged = kNxapiDisclosureVersion;
+        });
+    } catch (const std::exception&) {
     }
 
     try {
@@ -873,6 +989,16 @@ void App::presence_loop() {
         }
     };
 
+    const auto presence_paused = [this] {
+        if (stopping_) return true;
+        if (presence_refresh_requested_.load(std::memory_order_acquire)) return true;
+        const auto state = config_.snapshot();
+        return !state.discord_presence || state.session_token.empty();
+    };
+
+    // Consecutive polls that found you offline (or failed). After a few, the
+    // poll interval stretches so an idle PC sends far fewer Nintendo requests.
+    int offline_polls = 0;
     while (!stopping_) {
         AppConfig config;
         std::uint64_t generation;
@@ -882,6 +1008,7 @@ void App::presence_loop() {
             generation = account_generation_.load();
         }
         if (!config.discord_presence || config.session_token.empty()) {
+            offline_polls = 0;
             reset_enrichment();
             discord_.clear();
             std::unique_lock wait_lock(presence_sleep_mutex_);
@@ -893,14 +1020,30 @@ void App::presence_loop() {
             continue;
         }
 
+        // Only a running Discord client can show Rich Presence. Without one,
+        // check again locally rather than asking Nintendo for presence.
+        if (!discord_.client_running()) {
+            offline_polls = 0;
+            reset_enrichment();
+            discord_.clear();
+            release_deferred_sync(config.session_token);
+            presence_refresh_requested_.store(false, std::memory_order_release);
+            std::unique_lock wait_lock(presence_sleep_mutex_);
+            presence_cv_.wait_for(wait_lock, kDiscordClientCheckInterval, presence_paused);
+            continue;
+        }
+
         // Reaching this point means one of three things made a presence poll
         // eligible: Rich Presence became active, the recurring timer elapsed,
         // or an explicit refresh was queued by Sync Now. Consume any queued
         // refresh before polling; a new request arriving during the network
         // call remains set and causes another immediate pass afterwards.
-        presence_refresh_requested_.store(false, std::memory_order_release);
+        if (presence_refresh_requested_.exchange(false, std::memory_order_acq_rel)) {
+            offline_polls = 0;
+        }
 
         const auto session_token = config.session_token;
+        bool playing = false;
         try {
             auto presence = coral_.self_presence(session_token);
             config = config_.snapshot();
@@ -908,6 +1051,7 @@ void App::presence_loop() {
                 config.session_token == session_token &&
                 account_generation_.load() == generation) {
                 if (presence.is_playing()) {
+                    playing = true;
                     const auto revision = rpc_revision_.load();
                     presence.rpc = config.rpc;
                     const auto service = rpc_game_service_for(presence);
@@ -935,112 +1079,15 @@ void App::presence_loop() {
                     }
 
                     if (probing) {
-                        bool service_ready = false;
-                        // Game WebView bootstraps use the Nintendo Account locale
-                        // in nxapi and in the working backend. This profile data
-                        // is only needed for the one enrichment probe.
-                        try {
-                            const auto tokens = auth_.exchange_session_token(session_token);
-                            const auto profile = auth_.fetch_profile(tokens.access_token);
-                            splatnet_.set_locale(profile.language, profile.country);
-                            zeldanotes_.set_locale(profile.language, profile.country);
-                            game_services_.set_locale(profile.language, profile.country);
-                        } catch (...) {
-                            // The service clients retain safe en-GB/GB defaults if
-                            // the already-authenticated profile cannot be refreshed.
-                        }
-
-                        // Signing out/account switching can happen while the
-                        // profile or Nintendo service request is in flight.
-                        if (!stopping_ && account_generation_.load() == generation &&
-                            config_.snapshot().session_token == session_token) {
-                            switch (service) {
-                                case RpcGameService::Splatoon3:
-                                    try {
-                                        const auto web_token = coral_.get_web_service_token(
-                                            session_token, kSplatoon3GameServiceId);
-                                        if (!web_token.empty()) {
-                                            const auto splat_presence =
-                                                splatnet_.fetch_presence(web_token);
-                                            if (splat_presence.active) {
-                                                presence.custom_details =
-                                                    splat_presence.format_details();
-                                                presence.custom_details_without_name = splat_presence.title;
-                                                presence.custom_state =
-                                                    splat_presence.format_state();
-                                                if (!splat_presence.stage_image_uri.empty()) {
-                                                    presence.custom_image_uri =
-                                                        splat_presence.stage_image_uri;
-                                                }
-                                            }
-                                        }
-                                    } catch (...) {
-                                    }
-                                    break;
-                                case RpcGameService::ZeldaNotes:
-                                    for (const auto service_id : {kZeldaNotesGameServiceId, kZeldaNotesGameServiceIdAlt}) {
-                                        try {
-                                            const auto token = coral_.get_web_service_token(session_token, service_id);
-                                            if (zeldanotes_.prepare_session(token)) {
-                                                service_ready = true;
-                                                break;
-                                            }
-                                        } catch (const NintendoSessionExpired&) {
-                                            throw;
-                                        } catch (const std::exception&) {
-                                            // Try the alternate service if Nintendo rejects this one.
-                                        }
-                                    }
-                                    break;
-                                case RpcGameService::AnimalCrossing:
-                                    try {
-                                        const auto web_token = coral_.get_web_service_token(
-                                            session_token, kAnimalCrossingGameServiceId);
-                                        if (!web_token.empty()) {
-                                            const auto ac_presence =
-                                                game_services_.fetch_animal_crossing_presence(web_token);
-                                            if (ac_presence.active) {
-                                                const auto state_str = ac_presence.format_state();
-                                                const auto details_str = ac_presence.format_details();
-                                                presence.custom_details_without_name = ac_presence.island_name;
-                                                if (!state_str.empty()) presence.custom_state = state_str;
-                                                if (!details_str.empty()) presence.custom_details = details_str;
-                                                if (!ac_presence.image_uri.empty() &&
-                                                    ac_presence.image_uri.size() <= 300) {
-                                                    presence.profile_image_uri = ac_presence.image_uri;
-                                                }
-                                            }
-                                        }
-                                    } catch (...) {
-                                    }
-                                    break;
-
-                                case RpcGameService::Splatoon2:
-                                    try {
-                                        const auto web_token = coral_.get_web_service_token(
-                                            session_token, kSplatoon2GameServiceId);
-                                        if (!web_token.empty()) {
-                                            const auto splat2_presence =
-                                                game_services_.fetch_splatoon2_presence(web_token);
-                                            if (splat2_presence.active) {
-                                                const auto state_str = splat2_presence.format_state();
-                                                const auto details_str = splat2_presence.format_details();
-                                                presence.custom_details_without_name.clear();
-                                                if (!state_str.empty()) presence.custom_state = state_str;
-                                                if (!details_str.empty()) presence.custom_details = details_str;
-                                                if (!splat2_presence.stage_image_uri.empty()) {
-                                                    presence.custom_image_uri =
-                                                        splat2_presence.stage_image_uri;
-                                                }
-                                            }
-                                        }
-                                    } catch (...) {
-                                    }
-                                    break;
-                                case RpcGameService::None:
-                                    break;
-                            }
-                        }
+                        const bool service_ready = rpc_enricher_.enrich(
+                            service, session_token,
+                            [&] {
+                                // Signing out or switching accounts can happen
+                                // while a Nintendo request is in flight.
+                                return !stopping_ && account_generation_.load() == generation &&
+                                    config_.snapshot().session_token == session_token;
+                            },
+                            presence);
 
                         enrichment.complete(presence, service_ready, RpcEnrichmentCache::Clock::now());
                         presence.zelda_notes_enabled = enabled &&
@@ -1066,7 +1113,11 @@ void App::presence_loop() {
         } catch (const NintendoSessionExpired&) {
             invalidate_session(generation, true);
             continue;
-        } catch (const std::exception&) {
+        } catch (const std::exception& error) {
+            {
+                std::lock_guard state_lock(state_mutex_);
+                last_error_ = std::string("Rich Presence: ") + std::string(error.what()).substr(0, 200);
+            }
             // Presence failure must not strand auto-sync behind RPC priority.
             release_deferred_sync(session_token);
             if (!stopping_) {
@@ -1075,20 +1126,15 @@ void App::presence_loop() {
         }
 
         // Re-randomize every cycle so timer-driven Nintendo requests do not
-        // land on an exact 60-second cadence. Explicit user-triggered refreshes
-        // still bypass this wait and run immediately.
+        // land on an exact cadence. Explicit user-triggered refreshes still
+        // bypass this wait and run immediately.
+        offline_polls = playing ? 0 :
+            std::min(offline_polls + 1, kPresenceOfflineChecksBeforeBackoff);
         const auto poll_interval = jittered_interval(
             std::chrono::duration_cast<std::chrono::milliseconds>(
-                kPresencePollInterval));
+                presence_poll_interval(playing, offline_polls)));
         std::unique_lock wait_lock(presence_sleep_mutex_);
-        presence_cv_.wait_for(wait_lock, poll_interval, [this] {
-            if (stopping_) return true;
-            if (presence_refresh_requested_.load(std::memory_order_acquire)) {
-                return true;
-            }
-            const auto state = config_.snapshot();
-            return !state.discord_presence || state.session_token.empty();
-        });
+        presence_cv_.wait_for(wait_lock, poll_interval, presence_paused);
     }
 }
 
@@ -1209,6 +1255,42 @@ int App::run() {
     PlatformCallbacks callbacks;
 
     callbacks.ready = [this] {
+        // A sign-in carried over from an older build (or from NSO Album Sync)
+        // may never have seen the current disclosure. Nothing has contacted
+        // nxapi yet: ask first, and sign out if the user declines.
+        if (needs_nxapi_disclosure(config_.snapshot())) {
+            if (ui_.confirm(kNxapiDisclosureTitle,
+                    std::string(kNxapiDisclosureBody) + kNxapiSignedInQuestion)) {
+                try {
+                    config_.update([](AppConfig& value) {
+                        value.nxapi_disclosure_acknowledged = kNxapiDisclosureVersion;
+                    });
+                } catch (const std::exception&) {
+                    // Acknowledged for this session; asked again next launch.
+                }
+            } else {
+                invalidate_session(account_generation_.load(), false);
+            }
+        }
+        // Rich Presence turned on by an older build: explain what reaches
+        // Discord once, and turn it off if the user says no.
+        if constexpr (discord_available) {
+            const auto current = config_.snapshot();
+            if (current.discord_presence &&
+                current.discord_disclosure_acknowledged < kDiscordDisclosureVersion) {
+                const bool keep = ui_.confirm(kDiscordDisclosureEnabledTitle,
+                    std::string(kDiscordDisclosureBody) + kDiscordKeepOnQuestion);
+                try {
+                    config_.update([keep](AppConfig& value) {
+                        if (keep) value.discord_disclosure_acknowledged = kDiscordDisclosureVersion;
+                        else value.discord_presence = false;
+                    });
+                } catch (const std::exception&) {
+                    // Asked again next launch.
+                }
+            }
+        }
+
         const auto config = config_.snapshot();
         const bool use_presence = presence_enabled(config);
         initial_sync_deferred_.store(
@@ -1251,6 +1333,15 @@ int App::run() {
         }
         update_menu();
     };
+    callbacks.set_appearance = [this, report_settings_failure](Appearance appearance) {
+        try {
+            config_.update([appearance](AppConfig& value) { value.appearance = appearance; });
+        } catch (const std::exception&) {
+            report_settings_failure();
+            return;
+        }
+        update_menu();
+    };
     callbacks.clear_legacy_credential = [this, report_settings_failure] {
         if (!ui_.confirm("Clear saved credential",
                 "Remove the older credential from the settings file? Your current session can continue until you quit.")) {
@@ -1265,63 +1356,6 @@ int App::run() {
         } catch (const std::exception&) {
             report_settings_failure();
             return;
-        }
-        update_menu();
-    };
-
-    callbacks.copy_last_capture = [this] {
-        const auto generation = account_generation_.load();
-        try {
-            {
-                std::lock_guard state_lock(state_mutex_);
-                status_ = "Fetching latest capture…";
-            }
-            update_menu();
-
-            const auto path = sync_.fetch_latest_capture([this, generation] {
-                if (stopping_ || account_generation_.load() != generation) return;
-                if (config_.snapshot().notifications) {
-                    ui_.notify("Switch Album Sync", "Downloading latest capture...");
-                }
-            });
-            if (stopping_ || account_generation_.load() != generation) return;
-            if (!ui_.copy_file_to_clipboard(path)) {
-                {
-                    std::lock_guard state_lock(state_mutex_);
-                    status_ = "Could not place the latest capture on the clipboard";
-                    diagnostic_code_ = "clipboard_unavailable";
-                }
-                update_menu();
-                return;
-            }
-
-            // The download is validated and closed, and the platform has
-            // confirmed clipboard ownership before we announce success.
-            {
-                std::lock_guard state_lock(state_mutex_);
-                status_ = "Last capture copied to clipboard";
-                diagnostic_code_ = "capture_copied";
-            }
-            const auto config = config_.snapshot();
-            if (config.notifications) {
-                ui_.notify(
-                    "Switch Album Sync",
-                    "Latest capture copied to the clipboard.");
-            }
-        } catch (const NintendoSessionExpired&) {
-            if (!stopping_) invalidate_session(generation, true);
-            return;
-        } catch (const std::exception&) {
-            if (stopping_ || account_generation_.load() != generation) return;
-            const std::string message = "Could not fetch the latest capture. Check Nintendo’s album and try again.";
-            {
-                std::lock_guard state_lock(state_mutex_);
-                status_ = message;
-                diagnostic_code_ = "latest_capture_failed";
-            }
-            if (config_.snapshot().notifications) {
-                ui_.notify("Switch Album Sync", message);
-            }
         }
         update_menu();
     };
@@ -1373,12 +1407,23 @@ int App::run() {
 
     callbacks.toggle_discord = [this, report_settings_failure] {
         if constexpr (!discord_available) return;
+        // Rich Presence sends Nintendo account and game data to Discord, so
+        // explain what is shared and get an explicit yes the first time.
+        const auto current = config_.snapshot();
+        const bool acknowledge = !current.discord_presence &&
+            current.discord_disclosure_acknowledged < kDiscordDisclosureVersion;
+        if (acknowledge && !ui_.confirm(kDiscordDisclosureTitle,
+                std::string(kDiscordDisclosureBody) + kDiscordTurnOnQuestion)) {
+            update_menu();  // Undo the checkbox the user just clicked.
+            return;
+        }
         rpc_revision_.fetch_add(1);
         AppConfig config;
         try {
-            config = config_.update([](AppConfig& value) {
+            config = config_.update([acknowledge](AppConfig& value) {
                 value.discord_presence = !value.discord_presence;
                 value.discord_presence_setting_version = 1;
+                if (acknowledge) value.discord_disclosure_acknowledged = kDiscordDisclosureVersion;
             });
         } catch (const std::exception&) {
             report_settings_failure();
@@ -1478,6 +1523,142 @@ int App::run() {
     };
     callbacks.stop_watching_folder = [set_watch_folder] { set_watch_folder({}); };
 
+    const auto report_status = [this](const std::string& message, const char* code) {
+        {
+            std::lock_guard lock(state_mutex_);
+            status_ = message;
+            sync_detail_.clear();
+            diagnostic_code_ = code;
+        }
+        update_menu();
+    };
+    callbacks.choose_backup_folder = [this, report_settings_failure, report_status] {
+        const auto config = config_.snapshot();
+        const auto selected = ui_.choose_folder(config.backup_folder, L"Choose a backup folder");
+        if (selected.empty()) return;
+        const auto album = album_directory(path_from_utf8(config.destination_folder));
+        if (!valid_backup_folder(path_from_utf8(selected), album)) {
+            ui_.notify("Switch Album Sync", "Choose a backup folder separate from the album and its parent folders.");
+            return;
+        }
+        if (!ui_.confirm("Back up your album",
+                "Copy your captures to " + selected + "? New and changed captures are copied after each sync "
+                "or import. Nothing in the backup folder is ever deleted.")) return;
+        try {
+            config_.update([&](AppConfig& value) { value.backup_folder = selected; });
+        } catch (const std::exception&) {
+            report_settings_failure();
+            return;
+        }
+        if (!queue_sync(SyncRequest::backup)) report_status("Backup folder set. It will update after the current task.", "backup_folder_set");
+    };
+    callbacks.backup_now = [this, report_status] {
+        if (config_.snapshot().backup_folder.empty()) return;
+        if (!queue_sync(SyncRequest::backup)) {
+            ui_.notify("Switch Album Sync", "Wait for the current sync or import to finish, then try again.");
+        }
+    };
+    callbacks.stop_backup = [this, report_settings_failure, report_status] {
+        try {
+            config_.update([](AppConfig& value) { value.backup_folder.clear(); });
+        } catch (const std::exception&) {
+            report_settings_failure();
+            return;
+        }
+        report_status("Stopped backing up. Existing backup copies were left in place.", "backup_stopped");
+    };
+    callbacks.auto_sync_options = [this, report_settings_failure, report_status] {
+        const auto config = config_.snapshot();
+        const auto hours = [](int hour) {
+            char text[8];
+            std::snprintf(text, sizeof(text), "%02d:00", hour);
+            return std::string(text);
+        };
+        std::vector<int> selected;
+        if (config.pause_on_battery_saver) selected.push_back(0);
+        if (config.pause_on_metered) selected.push_back(1);
+        if (config.quiet_hours) selected.push_back(2);
+        const auto chosen = ui_.choose_options("Auto-sync options",
+            "Choose when automatic syncs should be skipped. A skipped check simply waits for the next one, "
+            "so these options only reduce how often the app contacts Nintendo. Sync now always works.",
+            {"Skip while battery saver is on", "Skip on metered connections",
+             "Quiet hours: skip between " + hours(config.quiet_start_hour) + " and " + hours(config.quiet_end_hour)},
+            selected);
+        if (!chosen) return;
+        const auto has = [&](int index) { return std::find(chosen->begin(), chosen->end(), index) != chosen->end(); };
+        try {
+            config_.update([&](AppConfig& value) {
+                value.pause_on_battery_saver = has(0);
+                value.pause_on_metered = has(1);
+                value.quiet_hours = has(2);
+            });
+        } catch (const std::exception&) {
+            report_settings_failure();
+            return;
+        }
+        report_status("Auto-sync options saved.", "auto_sync_options_saved");
+    };
+    callbacks.export_settings = [this] {
+        const auto config = config_.snapshot();
+        return Json(Json::object{
+            {"appearance", config.appearance == Appearance::dark ? "dark" :
+                config.appearance == Appearance::light ? "light" : "system"},
+            {"notifications", config.notifications},
+            {"autoSync", config.auto_sync},
+            {"syncIntervalMinutes", config.sync_interval_minutes},
+            {"autoSyncPauseOnBatterySaver", config.pause_on_battery_saver},
+            {"autoSyncPauseOnMetered", config.pause_on_metered},
+            {"autoSyncQuietHours", config.quiet_hours},
+            {"quietHoursStart", config.quiet_start_hour},
+            {"quietHoursEnd", config.quiet_end_hour},
+            {"rpcShowUsername", config.rpc.show_username},
+            {"rpcShowProfilePicture", config.rpc.show_profile_picture},
+            {"rpcShowPlayTime", config.rpc.show_play_time},
+            {"rpcZelda", config.rpc.zelda},
+            {"rpcAnimalCrossing", config.rpc.animal_crossing},
+            {"rpcSplatoon3", config.rpc.splatoon3},
+            {"rpcSplatoon2", config.rpc.splatoon2},
+        });
+    };
+    callbacks.import_settings = [this, report_settings_failure](const Json& settings) {
+        if (!settings.is_object()) return false;
+        // Only preferences are imported. Rich Presence itself and anything that
+        // needs a disclosure stays as it is on this PC.
+        try {
+            config_.update([&](AppConfig& value) {
+                const auto appearance = settings.string("appearance", "system");
+                value.appearance = appearance == "dark" ? Appearance::dark :
+                    appearance == "light" ? Appearance::light : Appearance::system;
+                value.notifications = settings.boolean("notifications", value.notifications);
+                value.auto_sync = settings.boolean("autoSync", value.auto_sync);
+                value.sync_interval_minutes = static_cast<int>(std::clamp<std::int64_t>(
+                    settings.integer("syncIntervalMinutes", value.sync_interval_minutes),
+                    kMinimumSyncIntervalMinutes, 7 * 24 * 60));
+                value.pause_on_battery_saver = settings.boolean("autoSyncPauseOnBatterySaver", value.pause_on_battery_saver);
+                value.pause_on_metered = settings.boolean("autoSyncPauseOnMetered", value.pause_on_metered);
+                value.quiet_hours = settings.boolean("autoSyncQuietHours", value.quiet_hours);
+                value.quiet_start_hour = static_cast<int>(std::clamp<std::int64_t>(
+                    settings.integer("quietHoursStart", value.quiet_start_hour), 0, 23));
+                value.quiet_end_hour = static_cast<int>(std::clamp<std::int64_t>(
+                    settings.integer("quietHoursEnd", value.quiet_end_hour), 0, 23));
+                value.rpc.show_username = settings.boolean("rpcShowUsername", value.rpc.show_username);
+                value.rpc.show_profile_picture = settings.boolean("rpcShowProfilePicture", value.rpc.show_profile_picture);
+                value.rpc.show_play_time = settings.boolean("rpcShowPlayTime", value.rpc.show_play_time);
+                value.rpc.zelda = settings.boolean("rpcZelda", value.rpc.zelda);
+                value.rpc.animal_crossing = settings.boolean("rpcAnimalCrossing", value.rpc.animal_crossing);
+                value.rpc.splatoon3 = settings.boolean("rpcSplatoon3", value.rpc.splatoon3);
+                value.rpc.splatoon2 = settings.boolean("rpcSplatoon2", value.rpc.splatoon2);
+            });
+        } catch (const std::exception&) {
+            report_settings_failure();
+            return false;
+        }
+        discord_.set_rpc_settings(config_.snapshot().rpc);
+        reschedule_auto_sync();
+        update_menu();
+        return true;
+    };
+
     callbacks.select_folder = [this, report_settings_failure] {
         const auto current = config_.snapshot();
         const auto selected = ui_.choose_folder(current.destination_folder);
@@ -1545,9 +1726,17 @@ int App::run() {
         const auto current = config_.snapshot();
         const auto proxy = ui_.prompt(
             "HTTP Proxy",
-            "Enter a proxy URL.",
+            "Enter an http:// proxy URL, or leave this empty to use the Windows proxy settings.",
             current.proxy_url);
         const auto normalized = trim(proxy);
+        if (!normalized.empty() && lower(normalized).rfind("http://", 0) != 0) {
+            {
+                std::lock_guard state_lock(state_mutex_);
+                status_ = "Proxy not changed. Enter a URL that starts with http://.";
+            }
+            update_menu();
+            return;
+        }
         try {
             config_.update([&](AppConfig& value) { value.proxy_url = normalized; });
         } catch (const std::exception&) {
@@ -1558,7 +1747,7 @@ int App::run() {
         {
             std::lock_guard state_lock(state_mutex_);
             status_ = normalized.empty()
-                ? "HTTP proxy disabled"
+                ? "Using the Windows proxy settings"
                 : "HTTP proxy updated";
         }
         update_menu();

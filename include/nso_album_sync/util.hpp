@@ -20,8 +20,6 @@ std::vector<unsigned char> sha256(const std::string& text);
 std::string url_encode(const std::string& text);
 std::string lower(std::string text);
 std::string trim(std::string text);
-std::string sanitize_folder(std::string text);
-std::string normalize_title(std::string text);
 
 std::int64_t unix_now();
 

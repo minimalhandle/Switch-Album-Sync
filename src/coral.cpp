@@ -5,15 +5,10 @@
 
 #include <algorithm>
 #include <cctype>
-#include <ctime>
-#include <fstream>
-#include <iomanip>
-#include <iterator>
-#include <sstream>
+#include <cstdio>
+#include <deque>
 #include <stdexcept>
 #include <utility>
-
-#include "nso_album_sync/windows_compat.hpp"
 
 namespace nso {
 namespace {
@@ -170,24 +165,6 @@ std::string exact_integer_field_in_object(
     return {};
 }
 
-std::string auth_rate_limit_key(const std::string& session_token) {
-    try {
-        const auto first_dot = session_token.find('.');
-        const auto second_dot = first_dot == std::string::npos
-            ? std::string::npos
-            : session_token.find('.', first_dot + 1);
-        if (first_dot != std::string::npos && second_dot != std::string::npos) {
-            const auto payload_bytes = base64_decode(
-                session_token.substr(first_dot + 1, second_dot - first_dot - 1));
-            const std::string payload(payload_bytes.begin(), payload_bytes.end());
-            const auto subject = Json::parse(payload).string("sub");
-            if (!subject.empty()) return base64url(sha256(subject));
-        }
-    } catch (...) {
-    }
-    return session_hash(session_token);
-}
-
 std::int64_t epoch_seconds(std::chrono::system_clock::time_point value) {
     return std::chrono::duration_cast<std::chrono::seconds>(
                value.time_since_epoch())
@@ -196,26 +173,6 @@ std::int64_t epoch_seconds(std::chrono::system_clock::time_point value) {
 
 std::chrono::system_clock::time_point time_from_epoch(std::int64_t value) {
     return std::chrono::system_clock::time_point(std::chrono::seconds(value));
-}
-
-std::chrono::seconds retry_after_delay(const std::string& value) {
-    try {
-        const auto seconds = std::stoll(value);
-        return std::chrono::seconds(std::max<std::int64_t>(1, seconds));
-    } catch (...) {
-    }
-    return std::chrono::minutes(15);
-}
-
-void replace_cache_file(
-    const std::filesystem::path& temporary,
-    const std::filesystem::path& target) {
-    if (!MoveFileExW(
-            temporary.c_str(), target.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        std::error_code ignored;
-        std::filesystem::remove(temporary, ignored);
-    }
 }
 
 MediaItem parse_media_item(const Json& item) {
@@ -352,22 +309,8 @@ void CoralClient::persist_session(const std::string& session_token) {
     SecureStore::put(kCoralCredentialAccount, json.dump());
 }
 
-void CoralClient::load_auth_attempts(
-    const std::string& session_token,
-    Clock::time_point now) {
-    (void)session_token;
-    (void)now;
-}
-
-void CoralClient::save_auth_attempts() const {
-}
-
-void CoralClient::throw_if_coral_rate_limited(Clock::time_point now) const {
-    (void)now;
-}
-
-void CoralClient::apply_coral_rate_limit_response(const HttpResponse& response) {
-    (void)response;
+std::string CoralClient::app_user_agent() {
+    return "com.nintendo.znca/" + nxapi_.nso_version() + "(Android/12)";
 }
 
 void CoralClient::clear_cached_session() {
@@ -685,7 +628,7 @@ std::string CoralClient::get_web_service_token(
                 coral_url("/v4/Game/GetWebServiceToken"),
                 encrypted_request,
                 {
-                    "Content-Type: application/octet-stream",
+                    // post_bytes sets Content-Type: application/octet-stream.
                     "Accept: application/octet-stream,application/json",
                     "Accept-Language: en-US",
                     "Authorization: Bearer " + access_token,
@@ -791,6 +734,9 @@ std::string CoralClient::get_web_service_token(
         }
 
         return token;
+    } catch (const NintendoSessionExpired&) {
+        // Let callers sign out instead of treating expiry as "no token".
+        throw;
     } catch (...) {
         return {};
     }

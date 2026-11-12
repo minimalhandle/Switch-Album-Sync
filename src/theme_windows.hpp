@@ -1,5 +1,6 @@
 #pragma once
 
+#include "nso_album_sync/appearance.hpp"
 #include "nso_album_sync/windows_compat.hpp"
 
 #include <functional>
@@ -8,24 +9,20 @@
 
 namespace nso::theme {
 
-// Nintendo brand red (#E60012) on a neutral light base. High-contrast mode
-// always falls back to system colours.
-constexpr COLORREF kRed = RGB(230, 0, 18);
-constexpr COLORREF kRedHot = RGB(215, 0, 17);
-constexpr COLORREF kRedPressed = RGB(184, 0, 14);
-constexpr COLORREF kBackground = RGB(244, 245, 246);
-constexpr COLORREF kCard = RGB(255, 255, 255);
-constexpr COLORREF kField = RGB(244, 245, 246);
-constexpr COLORREF kBorder = RGB(203, 207, 211);
-constexpr COLORREF kCardBorder = RGB(222, 225, 228);
-constexpr COLORREF kControl = RGB(250, 250, 251);
-constexpr COLORREF kControlHot = RGB(235, 237, 239);
-constexpr COLORREF kControlPressed = RGB(222, 225, 228);
-constexpr COLORREF kText = RGB(31, 34, 38);
-constexpr COLORREF kMuted = RGB(83, 89, 96);
-constexpr COLORREF kDisabled = RGB(109, 113, 117);
-constexpr COLORREF kPreview = RGB(24, 26, 28);
+// Neutral surfaces with Nintendo red used only as an accent: primary actions,
+// active toggles, progress and small brand marks. Light mode uses the brand
+// red (#E60012); dark mode uses a slightly softer red that doesn't glow on
+// charcoal. High-contrast mode always falls back to system colours.
+constexpr COLORREF kPreview = RGB(20, 21, 24);
 
+struct Palette {
+    COLORREF background, card, field, border, card_border;
+    COLORREF control, control_hot, control_pressed, text, muted, disabled;
+    COLORREF track, accent, accent_hot, accent_pressed;
+};
+
+const Palette& palette();
+void set_appearance(Appearance appearance);
 bool high_contrast();
 
 // Initialize the graphics used by custom controls.
@@ -33,10 +30,8 @@ void init_process();
 
 HBRUSH brush(COLORREF color);
 
-enum class Caption { neutral, red };
-
-// Apply the caption and theme existing child controls.
-void apply(HWND window, Caption caption = Caption::neutral);
+// Colours the caption to match the window and themes existing child controls.
+void apply(HWND window);
 
 // Marks a push button as the red primary action.
 void set_primary(HWND button, bool primary = true);
@@ -71,6 +66,7 @@ struct Dialog {
     bool checked = false;
     std::vector<std::wstring> choices;
     std::vector<int> selected;
+    bool single_choice = false;
     int width = 460;
     std::function<void(int)> on_command;
     std::function<bool()> completed;

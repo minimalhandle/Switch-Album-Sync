@@ -210,6 +210,12 @@ void ConfigManager::load() {
             config_.destination_folder = string_with_legacy_key(
                 json, "destinationFolder", "DestinationFolder", config_.destination_folder);
             config_.watch_folder = json.string("watchFolder");
+            config_.backup_folder = json.string("backupFolder");
+            config_.pause_on_battery_saver = json.boolean("autoSyncPauseOnBatterySaver", true);
+            config_.pause_on_metered = json.boolean("autoSyncPauseOnMetered", true);
+            config_.quiet_hours = json.boolean("autoSyncQuietHours", false);
+            config_.quiet_start_hour = static_cast<int>(std::clamp<std::int64_t>(json.integer("quietHoursStart", 23), 0, 23));
+            config_.quiet_end_hour = static_cast<int>(std::clamp<std::int64_t>(json.integer("quietHoursEnd", 7), 0, 23));
             // v1.0.0 defaulted auto-sync to enabled and respected an
             // explicitly saved AutoSyncEnabled/autoSync value. Preserve that
             // behavior across the C++ config migration.
@@ -240,18 +246,32 @@ void ConfigManager::load() {
             config_.rpc.splatoon2 = json.boolean("rpcSplatoon2", true);
             config_.start_on_boot = bool_with_legacy_key(
                 json, "startOnBoot", "StartOnBoot", false);
+            const auto appearance = json.string("appearance");
+            config_.appearance = appearance == "dark" ? Appearance::dark :
+                appearance == "light" ? Appearance::light : Appearance::system;
+            config_.nxapi_disclosure_acknowledged = static_cast<int>(std::clamp<std::int64_t>(
+                json.integer("nxapiDisclosureAcknowledged", 0), 0, kNxapiDisclosureVersion));
+            config_.discord_disclosure_acknowledged = static_cast<int>(std::clamp<std::int64_t>(
+                json.integer("discordDisclosureAcknowledged", 0), 0, kDiscordDisclosureVersion));
+            // Keep automatic syncs to a modest cadence even if the file was edited.
             config_.sync_interval_minutes = static_cast<int>(std::clamp<std::int64_t>(
                 integer_with_legacy_key(
                     json, "syncIntervalMinutes", "SyncIntervalMinutes", 60),
-                1,
+                kMinimumSyncIntervalMinutes,
                 (std::numeric_limits<int>::max)()));
             config_.last_sync = display_last_sync(string_with_legacy_key(
                 json, "lastSync", "LastSyncTime", "Never"));
             config_.proxy_url = string_with_legacy_key(
                 json, "proxyUrl", "ProxyUrl");
-            config_.nxapi_auth_client_id = string_with_legacy_key(
-                json, "nxapiAuthClientId", "NxapiAuthClientId",
-                config_.nxapi_auth_client_id);
+
+            // The nxapi-auth client ID is a build setting (release and
+            // development builds use different clients, as the nxapi terms
+            // require). Older builds saved it here, which let one build's
+            // client leak into another. Ignore and remove it.
+            if (json.find("nxapiAuthClientId") != nullptr ||
+                json.find("NxapiAuthClientId") != nullptr) {
+                needs_config_rewrite = true;
+            }
 
             // Rich Presence uses Switch Album Sync's public application identity.
             // Older builds persisted this 64-bit snowflake as a
@@ -338,7 +358,13 @@ void ConfigManager::save_locked() {
         {"userNickname", config_.user_nickname},
         {"destinationFolder", config_.destination_folder},
         {"watchFolder", config_.watch_folder},
+        {"backupFolder", config_.backup_folder},
         {"autoSync", config_.auto_sync},
+        {"autoSyncPauseOnBatterySaver", config_.pause_on_battery_saver},
+        {"autoSyncPauseOnMetered", config_.pause_on_metered},
+        {"autoSyncQuietHours", config_.quiet_hours},
+        {"quietHoursStart", config_.quiet_start_hour},
+        {"quietHoursEnd", config_.quiet_end_hour},
         {"autoSyncSettingVersion",
          static_cast<std::int64_t>(config_.auto_sync_setting_version)},
         {"notifications", config_.notifications},
@@ -353,10 +379,13 @@ void ConfigManager::save_locked() {
         {"discordPresenceSettingVersion",
          static_cast<std::int64_t>(config_.discord_presence_setting_version)},
         {"startOnBoot", config_.start_on_boot},
+        {"appearance", config_.appearance == Appearance::dark ? "dark" :
+            config_.appearance == Appearance::light ? "light" : "system"},
+        {"nxapiDisclosureAcknowledged", config_.nxapi_disclosure_acknowledged},
+        {"discordDisclosureAcknowledged", config_.discord_disclosure_acknowledged},
         {"syncIntervalMinutes", config_.sync_interval_minutes},
         {"lastSync", config_.last_sync},
         {"proxyUrl", config_.proxy_url},
-        {"nxapiAuthClientId", config_.nxapi_auth_client_id},
     });
 
     auto temporary = config_file_;
@@ -371,11 +400,6 @@ void ConfigManager::save_locked() {
     replace_config_file(temporary, config_file_);
     secure_marker_on_disk_ = secure_marker;
     if (storage != SessionStorage::legacy) legacy_session_marker_.clear();
-}
-
-void ConfigManager::save() {
-    std::lock_guard lock(mutex_);
-    save_locked();
 }
 
 void ConfigManager::clear_session() {

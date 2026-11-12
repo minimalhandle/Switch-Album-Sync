@@ -19,6 +19,9 @@ public:
     ~DiscordPresence();
 
     bool available() const;
+    // True when a Discord desktop client is listening for Rich Presence on
+    // this PC. Checked locally, without contacting Discord or Nintendo.
+    bool client_running() const;
     bool self_test_runtime();
     void update(const NintendoPresence& presence);
     void clear();

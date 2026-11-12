@@ -1,4 +1,5 @@
 #include "dashboard_windows.hpp"
+#include "album_tools_windows.hpp"
 #include "library_windows.hpp"
 #include "theme_windows.hpp"
 #include <gdiplus.h>
@@ -26,7 +27,7 @@ constexpr UINT kThumbnailsReady = WM_APP + 61;
 constexpr UINT_PTR kFeedbackTimer = 1;
 constexpr int kWidth = 704;
 constexpr int kMinimumWidth = 610;
-constexpr int kBannerHeight = 88;
+constexpr int kBannerHeight = 82;
 constexpr int kCardPadding = 12;
 constexpr int kCardGap = 8;
 constexpr int kMargin = 24;
@@ -50,8 +51,10 @@ enum Control {
     Feedback, PasteSignIn, OpenLibrary, OpenHistory, OpenStorage, ImportCaptures, OpenDuplicates,
     DiscordUsername, DiscordPicture, DiscordPlayTime, DiscordZelda, DiscordAnimalCrossing,
     DiscordSplatoon3, DiscordSplatoon2, DiscordRefresh, DiscordHint,
-    DiscordProfileHeading, DiscordGamesHeading, DiscordZeldaGames, ControlCount,
-    ChooseWatchFolder, StopWatchingFolder,
+    DiscordProfileHeading, DiscordGamesHeading, DiscordZeldaGames, AppearanceMenu, ControlCount,
+    ChooseWatchFolder, StopWatchingFolder, FollowWindows, LightMode, DarkMode,
+    FindDuplicates, StorageCleanup, Highlights, ChooseBackup, BackupNow, StopBackup,
+    AutoSyncOptions, ExportSettings, ImportSettings,
 };
 
 constexpr struct DiscordOption {
@@ -135,7 +138,7 @@ Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr) {
     if (result && tile) {
         HGDIOBJ previous = SelectObject(tile, result.get());
         RECT bounds{0, 0, size.cx, size.cy};
-        FillRect(tile, &bounds, theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kField));
+        FillRect(tile, &bounds, theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::palette().field));
         BITMAP image{};
         if (source && GetObjectW(source, sizeof(image), &image) &&
             image.bmWidth > 0 && image.bmHeight > 0) {
@@ -154,7 +157,7 @@ Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr) {
             }
         } else {
             SetBkMode(tile, TRANSPARENT);
-            SetTextColor(tile, theme::high_contrast() ? GetSysColor(COLOR_GRAYTEXT) : theme::kMuted);
+            SetTextColor(tile, theme::high_contrast() ? GetSysColor(COLOR_GRAYTEXT) : theme::palette().muted);
             SelectObject(tile, GetStockObject(DEFAULT_GUI_FONT));
             DrawTextW(tile, L"Capture", -1, &bounds, DT_SINGLELINE | DT_CENTER | DT_VCENTER);
         }
@@ -332,6 +335,7 @@ struct WindowsDashboard::Impl {
         button(OpenLibrary, L"Open library");
         button(ImportCaptures, L"Import USB / SD…");
         button(AlbumActions, L"Album tools ▾");
+        button(AppearanceMenu, L"Appearance ▾");
         label(AlbumHeading, L"Album sync");
         control(Destination, L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL);
         label(LastSync);
@@ -367,7 +371,7 @@ struct WindowsDashboard::Impl {
         label(DiscordUnavailable, L"Unavailable in this build.");
         label(Feedback, L"", SS_RIGHT);
         set_fonts();
-        theme::apply(window, theme::Caption::red);
+        theme::apply(window);
         theme::set_primary(controls[SyncNow]);
         update(state);
     }
@@ -383,15 +387,15 @@ struct WindowsDashboard::Impl {
         };
         body = font(14, FW_NORMAL);
         heading = font(15, FW_SEMIBOLD);
-        title = font(27, FW_SEMIBOLD);
+        title = font(24, FW_SEMIBOLD);
         for (auto child : controls) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(body), TRUE);
-        for (auto id : {AccountHeading, AlbumHeading, SyncStatus, CapturesHeading, DiscordHeading,
+        for (auto id : {AccountHeading, AlbumHeading, CapturesHeading, DiscordHeading,
                         DiscordProfileHeading, DiscordGamesHeading}) {
             SendMessageW(controls[id], WM_SETFONT, reinterpret_cast<WPARAM>(heading), TRUE);
         }
         SendMessageW(controls[Title], WM_SETFONT, reinterpret_cast<WPARAM>(title), TRUE);
         SendMessageW(controls[Destination], EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                     MAKELPARAM(px(6), px(6)));
+                     MAKELPARAM(px(5), px(5)));
         if (old_body) DeleteObject(old_body);
         if (old_heading) DeleteObject(old_heading);
         if (old_title) DeleteObject(old_title);
@@ -404,9 +408,11 @@ struct WindowsDashboard::Impl {
     struct Arrangement {
         std::vector<Placement> items;
         std::vector<std::pair<int, int>> cards;  // top and bottom of each section panel
+        std::vector<RECT> fields;  // rounded frames drawn behind borderless fields
         int height = 0;
     };
     std::vector<std::pair<int, int>> cards;
+    std::vector<RECT> fields;
 
     // Builds the dashboard from top to bottom. Each section is a card and each
     // row advances the cursor, so resizing a row moves everything below it.
@@ -421,13 +427,14 @@ struct WindowsDashboard::Impl {
             put(id, right - inset, top, width, height);
         };
         int y = 18;
-        put(Title, left, y, span, 38);
-        put(Subtitle, left, y + 42, span, 22);
+        put(Title, left, y, span, 34);
+        put(Subtitle, left, y + 36, span, 22);
 
         y = kBannerHeight + 10;
         put(OpenLibrary, left, y, 112, 32);
         put(ImportCaptures, left + 120, y, 140, 32);
         put_right(AlbumActions, 126, y, 126, 32);
+        put_right(AppearanceMenu, 252, y, 118, 32);
         y += 44;
 
         int card_top = 0;
@@ -456,8 +463,10 @@ struct WindowsDashboard::Impl {
             put(Progress, left, y, span, 8);
             y += 16;
         }
-        put(Destination, left, y, span, 26);
-        y += 33;
+        // The read-only path sits inside a drawn rounded field.
+        result.fields.push_back(RECT{left, y, left + span, y + 28});
+        put(Destination, left + 4, y + 5, span - 8, 19);
+        y += 36;
         put(LastSync, left, y, half - 8, 21);
         put(NextSync, left + half, y, half, 21);
         y += 23;
@@ -536,6 +545,7 @@ struct WindowsDashboard::Impl {
                                   MulDiv(client.right, 96, static_cast<int>(dpi)) - kMargin);
         const auto plan = arrange(right);
         cards = plan.cards;
+        fields = plan.fields;
         const auto place = [&](const Placement& item, HDWP batch) {
             const auto& r = item.bounds;
             constexpr UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;
@@ -554,6 +564,50 @@ struct WindowsDashboard::Impl {
             for (const auto& item : plan.items) place(item, nullptr);
         }
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+    }
+
+    // Drops the series prefix and edition suffix that would otherwise make
+    // every label in a series read the same once shortened, e.g.
+    // "The Legend of Zelda: Tears of the Kingdom - Nintendo Switch 2 Edition"
+    // becomes "Tears of the Kingdom".
+    static std::wstring short_game_name(std::wstring name) {
+        const auto strip_prefix = [&](std::wstring_view prefix) {
+            if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) return;
+            auto rest = name.substr(prefix.size());
+            const auto start = rest.find_first_not_of(L": ");
+            if (start != std::wstring::npos) name = rest.substr(start);
+        };
+        for (const auto suffix : {std::wstring_view(L" - Nintendo Switch 2 Edition"),
+                                  std::wstring_view(L" Nintendo Switch 2 Edition")}) {
+            if (name.size() > suffix.size() &&
+                name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
+                name.resize(name.size() - suffix.size());
+                break;
+            }
+        }
+        strip_prefix(L"The Legend of Zelda");
+        return name;
+    }
+
+    // Shortens a thumbnail label with an ellipsis so it fits under its tile.
+    // The list view itself would let single-line labels overflow and scroll.
+    std::wstring fit_label(std::wstring label, int width) const {
+        HDC dc = GetDC(controls[Captures]);
+        if (!dc) return label;
+        const auto old = SelectObject(dc, body);
+        const auto fits = [&](const std::wstring& value) {
+            SIZE size{};
+            GetTextExtentPoint32W(dc, value.c_str(), static_cast<int>(value.size()), &size);
+            return size.cx <= width;
+        };
+        if (!fits(label)) {
+            while (!label.empty() && !fits(label + L"…")) label.pop_back();
+            while (!label.empty() && label.back() == L' ') label.pop_back();
+            label += L"…";
+        }
+        SelectObject(dc, old);
+        ReleaseDC(controls[Captures], dc);
+        return label;
     }
 
     void refresh_captures(bool force = false) {
@@ -577,9 +631,17 @@ struct WindowsDashboard::Impl {
         for (std::size_t i = 0; i < count; ++i) {
             if (shown_captures[i] == selection) select_index = static_cast<int>(i);
             const int image = blank && images ? ImageList_Add(images, blank.get(), nullptr) : -1;
+            // Captures are stored in a folder per game, so the folder names
+            // the game; captures left in the album root fall back to a type.
             const auto extension = shown_captures[i].extension().wstring();
-            std::wstring caption = CompareStringOrdinal(extension.c_str(), -1, L".mp4", -1, TRUE) ==
-                CSTR_EQUAL ? L"Video" : L"Screenshot";
+            const bool video = CompareStringOrdinal(extension.c_str(), -1, L".mp4", -1, TRUE) == CSTR_EQUAL;
+            const auto folder = shown_captures[i].parent_path();
+            const bool sorted = !folder.empty() &&
+                folder.lexically_normal() != state.destination.lexically_normal();
+            std::wstring caption = sorted ? short_game_name(folder.filename().wstring()) :
+                video ? L"Video" : L"Screenshot";
+            if (sorted && video) caption = L"▶ " + caption;
+            caption = fit_label(caption, px(kThumbnailWidth + 4));
             LVITEMW item{};
             item.mask = LVIF_TEXT | LVIF_IMAGE;
             item.iItem = static_cast<int>(i);
@@ -707,8 +769,30 @@ struct WindowsDashboard::Impl {
             add(ChooseFolder, L"Change album folder…");
             add(ChooseWatchFolder, state.watching_folder ? L"Change watched folder…" : L"Watch a folder…");
             if (state.watching_folder) add(StopWatchingFolder, L"Stop watching folder");
+            const bool backing_up = !state.backup_folder.empty();
+            add(ChooseBackup, backing_up ? L"Change backup folder…" : L"Back up to a folder…");
+            if (backing_up) {
+                add(BackupNow, L"Back up now", !state.sync_busy);
+                add(StopBackup, L"Stop backing up");
+            }
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            const bool has_captures = state.capture_library && !state.capture_library->empty();
+            add(FindDuplicates, L"Find duplicates…", has_captures);
+            add(StorageCleanup, L"Storage cleanup…", has_captures);
+            add(Highlights, L"Highlights grid…", has_captures);
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            add(AutoSyncOptions, L"Auto-sync options…");
+            add(ExportSettings, L"Export settings…");
+            add(ImportSettings, L"Import settings…");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             add(CopyDiagnostics, L"Copy diagnostics", !state.diagnostics.empty());
+        } else if (anchor == AppearanceMenu) {
+            const auto add_mode = [&](Control id, const wchar_t* label, Appearance mode) {
+                AppendMenuW(menu, MF_STRING | (state.appearance == mode ? MF_CHECKED : MF_UNCHECKED), 2000 + id, label);
+            };
+            add_mode(FollowWindows, L"Follow Windows", Appearance::system);
+            add_mode(LightMode, L"Light", Appearance::light);
+            add_mode(DarkMode, L"Dark", Appearance::dark);
         } else {
             add(CopyLatest, L"Copy latest capture", !shown_captures.empty());
             add(ShowInFolder, L"Show selected capture in folder", !selected_capture().empty());
@@ -730,7 +814,14 @@ struct WindowsDashboard::Impl {
         }
         switch (id) {
             case AlbumActions:
+            case AppearanceMenu:
             case CaptureActions: show_actions(id); break;
+            case FollowWindows: case LightMode: case DarkMode: {
+                const auto mode = id == LightMode ? Appearance::light :
+                    id == DarkMode ? Appearance::dark : Appearance::system;
+                if (mode != state.appearance && callbacks->set_appearance) callbacks->set_appearance(mode);
+                break;
+            }
             case DiscordSettings:
                 discord_settings_open = !discord_settings_open;
                 text(DiscordSettings, discord_settings_open ? L"Settings ▴" : L"Settings ▾");
@@ -744,6 +835,21 @@ struct WindowsDashboard::Impl {
             case OpenDuplicates: library.show(window, LibraryPage::duplicates, *callbacks); break;
             case ImportCaptures: if (callbacks->import_captures) callbacks->import_captures(); break;
             case ChooseWatchFolder: if (callbacks->choose_watch_folder) callbacks->choose_watch_folder(); break;
+            case ChooseBackup: if (callbacks->choose_backup_folder) callbacks->choose_backup_folder(); break;
+            case BackupNow: if (callbacks->backup_now) callbacks->backup_now(); break;
+            case StopBackup: if (callbacks->stop_backup) callbacks->stop_backup(); break;
+            case AutoSyncOptions: if (callbacks->auto_sync_options) callbacks->auto_sync_options(); break;
+            case FindDuplicates: case StorageCleanup: case Highlights: case ExportSettings: case ImportSettings: {
+                const auto tool = id == FindDuplicates ? AlbumTool::duplicates : id == StorageCleanup ? AlbumTool::cleanup :
+                    id == Highlights ? AlbumTool::highlights : id == ExportSettings ? AlbumTool::export_settings :
+                    AlbumTool::import_settings;
+                const auto snapshot = state;  // Dialogs pump messages; keep a stable copy.
+                if (run_album_tool(window, tool, snapshot, *callbacks)) {
+                    library.reload_saved_data();
+                    if (callbacks->refresh_captures) callbacks->refresh_captures();
+                }
+                break;
+            }
             case StopWatchingFolder: if (callbacks->stop_watching_folder) callbacks->stop_watching_folder(); break;
             case AccountAction:
                 if (state.sign_in_pending) callbacks->cancel_sign_in();
@@ -869,8 +975,14 @@ struct WindowsDashboard::Impl {
                         auto* tip = reinterpret_cast<NMLVGETINFOTIPW*>(lp);
                         if (tip->iItem >= 0 && static_cast<std::size_t>(tip->iItem) < shown_captures.size() &&
                             tip->cchTextMax > 0) {
-                            const auto filename = shown_captures[static_cast<std::size_t>(tip->iItem)].filename();
-                            wcsncpy_s(tip->pszText, tip->cchTextMax, filename.c_str(), _TRUNCATE);
+                            // Long game names are cut short under the thumbnail, so
+                            // the tip spells out the folder as well as the file.
+                            const auto& capture = shown_captures[static_cast<std::size_t>(tip->iItem)];
+                            const auto folder = capture.parent_path();
+                            const std::wstring text = folder.lexically_normal() == state.destination.lexically_normal()
+                                ? capture.filename().wstring()
+                                : folder.filename().wstring() + L"\n" + capture.filename().wstring();
+                            wcsncpy_s(tip->pszText, tip->cchTextMax, text.c_str(), _TRUNCATE);
                         }
                     }
                     if (notice->code == NM_DBLCLK || notice->code == NM_RETURN) {
@@ -886,16 +998,21 @@ struct WindowsDashboard::Impl {
                 if (high_contrast_enabled()) {
                     FillRect(dc, &bounds, GetSysColorBrush(COLOR_WINDOW));
                 } else {
-                    FillRect(dc, &bounds, theme::brush(theme::kBackground));
+                    FillRect(dc, &bounds, theme::brush(theme::palette().background));
                     const int right = bounds.right - px(12);
                     const auto card = [&](int top, int bottom) {
                         theme::fill_round(dc, RECT{px(12), px(top) - scroll, right, px(bottom) - scroll},
-                                          px(14), theme::kCard, theme::kCardBorder);
+                                          px(14), theme::palette().card, theme::palette().card_border);
                     };
                     for (const auto& [top, bottom] : cards) card(top, bottom);
-                    const int banner_bottom = px(kBannerHeight) - scroll;
-                    bounds.bottom = banner_bottom;
-                    FillRect(dc, &bounds, theme::brush(theme::kRed));
+                    for (const auto& field : fields) {
+                        theme::fill_round(dc, RECT{px(field.left), px(field.top) - scroll, px(field.right),
+                                                   px(field.bottom) - scroll},
+                                          px(6), theme::palette().field, theme::palette().border);
+                    }
+                    // A small red mark beside the title carries the Nintendo accent.
+                    theme::fill_round(dc, RECT{px(12), px(24) - scroll, px(16), px(48) - scroll},
+                                      px(2), theme::palette().accent);
                 }
                 return TRUE;
             }
@@ -903,12 +1020,12 @@ struct WindowsDashboard::Impl {
                 if (high_contrast_enabled()) return DefWindowProcW(window, msg, wp, lp);
                 const auto child = reinterpret_cast<HWND>(lp);
                 const bool header = child == controls[OpenLibrary] || child == controls[ImportCaptures] ||
-                    child == controls[AlbumActions];
-                return theme::control_color(msg, wp, lp, header ? theme::kBackground : theme::kCard);
+                    child == controls[AlbumActions] || child == controls[AppearanceMenu];
+                return theme::control_color(msg, wp, lp, header ? theme::palette().background : theme::palette().card);
             }
             case WM_CTLCOLOREDIT:
             case WM_CTLCOLORLISTBOX:
-                if (const auto brush = theme::control_color(msg, wp, lp, theme::kCard)) return brush;
+                if (const auto brush = theme::control_color(msg, wp, lp, theme::palette().card)) return brush;
                 return DefWindowProcW(window, msg, wp, lp);
             case WM_CTLCOLORSTATIC: {
                 auto dc = reinterpret_cast<HDC>(wp);
@@ -919,13 +1036,13 @@ struct WindowsDashboard::Impl {
                 }
                 const auto child = reinterpret_cast<HWND>(lp);
                 if (child == controls[Title] || child == controls[Subtitle]) {
-                    SetTextColor(dc, RGB(255, 255, 255));
-                    return reinterpret_cast<LRESULT>(theme::brush(theme::kRed));
+                    SetTextColor(dc, child == controls[Title] ? theme::palette().text : theme::palette().muted);
+                    return reinterpret_cast<LRESULT>(theme::brush(theme::palette().background));
                 }
-                const auto result = theme::control_color(msg, wp, lp, theme::kCard);
+                const auto result = theme::control_color(msg, wp, lp, theme::palette().card);
                 for (const auto id : {CredentialNote, LastSync, NextSync, SyncDetail, EmptyCaptures,
                                       DiscordHint, DiscordZeldaGames, DiscordUnavailable, Feedback}) {
-                    if (child == controls[id]) SetTextColor(dc, theme::kMuted);
+                    if (child == controls[id]) SetTextColor(dc, theme::palette().muted);
                 }
                 return result;
             }
@@ -990,7 +1107,6 @@ bool WindowsDashboard::create(HICON icon, const PlatformCallbacks& callbacks,
     type.hInstance = instance;
     type.hIcon = icon;
     type.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    type.hbrBackground = theme::high_contrast() ? GetSysColorBrush(COLOR_WINDOW) : theme::brush(theme::kBackground);
     type.lpszClassName = kDashboardClass;
     RegisterClassW(&type);
 

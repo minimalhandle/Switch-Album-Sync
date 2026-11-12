@@ -477,6 +477,24 @@ bool DiscordPresence::available() const {
     return impl_ != nullptr;
 }
 
+bool DiscordPresence::client_running() const {
+    // Rich Presence reaches the desktop client (Discord, PTB, Canary or a
+    // compatible client) through its local discord-ipc-0..9 named pipe.
+    // Listing pipes does not connect to them.
+    WIN32_FIND_DATAW entry{};
+    const HANDLE find = FindFirstFileW(L"\\\\.\\pipe\\*", &entry);
+    if (find == INVALID_HANDLE_VALUE) return true;  // Can't tell; don't block Rich Presence.
+    bool found = false;
+    do {
+        if (_wcsnicmp(entry.cFileName, L"discord-ipc-", 12) == 0) {
+            found = true;
+            break;
+        }
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+    return found;
+}
+
 bool DiscordPresence::self_test_runtime() {
     if (!impl_) return false;
     std::lock_guard sdk_lock(impl_->sdk_mutex);
@@ -539,6 +557,7 @@ DiscordPresence::DiscordPresence(std::uint64_t) {}
 DiscordPresence::~DiscordPresence() = default;
 
 bool DiscordPresence::available() const { return false; }
+bool DiscordPresence::client_running() const { return false; }
 bool DiscordPresence::self_test_runtime() { return false; }
 void DiscordPresence::update(const NintendoPresence&) {}
 void DiscordPresence::clear() {}

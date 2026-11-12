@@ -9,8 +9,6 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
-#include <deque>
-#include <filesystem>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -65,12 +63,10 @@ public:
     CoralClient(
         HttpClient& http,
         NintendoAuthManager& auth,
-        NxapiClient& nxapi,
-        std::filesystem::path cache_directory)
+        NxapiClient& nxapi)
         : http_(http),
           auth_(auth),
-          nxapi_(nxapi),
-          cache_directory_(std::move(cache_directory)) {}
+          nxapi_(nxapi) {}
 
     std::vector<MediaItem> media_list(const std::string& session_token);
     NintendoPresence self_presence(const std::string& session_token);
@@ -78,6 +74,9 @@ public:
         const std::string& session_token,
         std::uint64_t game_service_id = 0);
     void clear_cached_session();
+    // The User-Agent the app's Coral requests use, for other requests to
+    // Nintendo services (imitating the official app, as the nxapi terms advise).
+    std::string app_user_agent();
 
 private:
     using Clock = std::chrono::system_clock;
@@ -85,21 +84,16 @@ private:
     HttpClient& http_;
     NintendoAuthManager& auth_;
     NxapiClient& nxapi_;
-    std::filesystem::path cache_directory_;
 
     std::mutex session_mutex_;
     std::mutex login_mutex_;
     std::mutex request_mutex_;
-    mutable std::recursive_mutex rate_limit_mutex_;
     std::atomic<std::uint64_t> session_generation_{0};
     std::string coral_access_token_;
     std::string cached_session_token_;
     std::string user_id_;
     std::string na_id_;
     Clock::time_point coral_token_expiry_{};
-    std::deque<Clock::time_point> auth_attempts_;
-    std::string rate_limit_session_hash_;
-    Clock::time_point coral_rate_limit_until_{};
 
     struct CachedWebServiceToken {
         std::string token;
@@ -117,10 +111,6 @@ private:
         const std::string& session_token,
         Clock::time_point now);
     void persist_session(const std::string& session_token);
-    void load_auth_attempts(const std::string& session_token, Clock::time_point now);
-    void save_auth_attempts() const;
-    void throw_if_coral_rate_limited(Clock::time_point now) const;
-    void apply_coral_rate_limit_response(const HttpResponse& response);
 };
 
 }  // namespace nso

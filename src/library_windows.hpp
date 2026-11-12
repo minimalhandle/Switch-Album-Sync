@@ -13,6 +13,9 @@ public:
     void show_arrivals(HWND owner, const PlatformCallbacks& callbacks,
                        const std::vector<std::filesystem::path>& captures);
     void update(const MenuState& state);
+    // Re-reads tags, favourites and collections after they changed on disk
+    // (for example, Import settings).
+    void reload_saved_data();
     bool route_key(MSG& message) const;
 
 private:
@@ -20,6 +23,5 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
-bool copy_capture_image(HWND owner, const std::filesystem::path& path);
 bool copy_capture_files(HWND owner, const std::vector<std::filesystem::path>& paths);
 }

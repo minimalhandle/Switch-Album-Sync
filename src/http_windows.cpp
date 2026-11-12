@@ -1,6 +1,6 @@
 #include "nso_album_sync/http.hpp"
 #include "nso_album_sync/util.hpp"
-
+#include "nso_album_sync/version.hpp"
 
 #include "nso_album_sync/windows_compat.hpp"
 #include <winhttp.h>
@@ -221,7 +221,7 @@ bool is_internal_manual_redirect_header(const std::string& header) {
 std::wstring build_headers(
     const std::vector<std::string>& headers,
     const std::string& content_type) {
-    std::wstring result = L"Connection: close\r\nAccept-Encoding: identity\r\n";
+    std::wstring result = L"Accept-Encoding: identity\r\n";
 
     for (const auto& header : headers) {
         // This header is an internal transport hint. Never send it to Nintendo.
@@ -383,6 +383,36 @@ std::string form_component_encode(const std::string& text) {
 HttpClient::HttpClient() = default;
 HttpClient::~HttpClient() = default;
 
+std::shared_ptr<void> HttpClient::session() const {
+    const std::string proxy_url = proxy_;
+    std::lock_guard lock(session_mutex_);
+    if (session_ && session_proxy_ == proxy_url) return session_;
+
+    // With no proxy configured, follow the Windows proxy settings (including
+    // PAC scripts), the same as the system browser.
+    std::wstring proxy;
+    DWORD access_type = WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY;
+    LPCWSTR proxy_name = WINHTTP_NO_PROXY_NAME;
+    if (!proxy_url.empty()) {
+        proxy = proxy_server_from_url(proxy_url);
+        access_type = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
+        proxy_name = proxy.c_str();
+    }
+
+    const HINTERNET handle = WinHttpOpen(
+        L"Switch Album Sync/" NSO_APP_VERSION,
+        access_type,
+        proxy_name,
+        WINHTTP_NO_PROXY_BYPASS,
+        0);
+    if (handle == nullptr) {
+        throw_winhttp_error("WinHttpOpen");
+    }
+    session_ = std::shared_ptr<void>(handle, [](void* value) { WinHttpCloseHandle(value); });
+    session_proxy_ = proxy_url;
+    return session_;
+}
+
 HttpResponse HttpClient::request(
     const std::string& method,
     const std::string& url,
@@ -391,43 +421,15 @@ HttpResponse HttpClient::request(
     const std::string& content_type,
     long timeout_seconds,
     std::size_t max_response_bytes) const {
-    const auto destination = parse_url(url);
-
-    std::wstring proxy;
-    DWORD access_type = WINHTTP_ACCESS_TYPE_NO_PROXY;
-    LPCWSTR proxy_name = WINHTTP_NO_PROXY_NAME;
-    LPCWSTR proxy_bypass = WINHTTP_NO_PROXY_BYPASS;
-
-    if (!proxy_.empty()) {
-        proxy = proxy_server_from_url(proxy_);
-        access_type = WINHTTP_ACCESS_TYPE_NAMED_PROXY;
-        proxy_name = proxy.c_str();
-    }
-
-    InternetHandle session(WinHttpOpen(
-        L"Switch Album Sync/2.0",
-        access_type,
-        proxy_name,
-        proxy_bypass,
-        0));
-    if (!session) {
-        throw_winhttp_error("WinHttpOpen");
-    }
-
-    const long safe_timeout = (std::max)(1L, timeout_seconds);
-    const long max_seconds = (std::numeric_limits<int>::max)() / 1000L;
-    const int timeout_ms = static_cast<int>((std::min)(safe_timeout, max_seconds) * 1000L);
-    if (!WinHttpSetTimeouts(
-            session.get(),
-            timeout_ms,
-            timeout_ms,
-            timeout_ms,
-            timeout_ms)) {
-        throw_winhttp_error("WinHttpSetTimeouts");
-    }
+    const auto loopback_port = loopback_port_.load();
+    const auto destination = parse_url(loopback_port != 0 && url.rfind("https://", 0) == 0
+        ? "http://127.0.0.1:" + std::to_string(loopback_port) + "/" + url.substr(8)
+        : url);
+    // Declared before the connection and request handles so it outlives them.
+    const auto shared_session = session();
 
     InternetHandle connection(WinHttpConnect(
-        session.get(),
+        static_cast<HINTERNET>(shared_session.get()),
         destination.host.c_str(),
         destination.port,
         0));
@@ -447,6 +449,30 @@ HttpResponse HttpClient::request(
         flags));
     if (!request) {
         throw_winhttp_error("WinHttpOpenRequest");
+    }
+
+    const long safe_timeout = (std::max)(1L, timeout_seconds);
+    const long max_seconds = (std::numeric_limits<int>::max)() / 1000L;
+    const int timeout_ms = static_cast<int>((std::min)(safe_timeout, max_seconds) * 1000L);
+    if (!WinHttpSetTimeouts(
+            request.get(),
+            timeout_ms,
+            timeout_ms,
+            timeout_ms,
+            timeout_ms)) {
+        throw_winhttp_error("WinHttpSetTimeouts");
+    }
+
+    // The session is shared, so never let WinHTTP store cookies from one
+    // response and replay them on later requests (or for another account).
+    // Callers that need cookies send them explicitly.
+    DWORD disabled_features = WINHTTP_DISABLE_COOKIES;
+    if (!WinHttpSetOption(
+            request.get(),
+            WINHTTP_OPTION_DISABLE_FEATURE,
+            &disabled_features,
+            sizeof(disabled_features))) {
+        throw_winhttp_error("WinHttpSetOption(disable cookies)");
     }
 
     const bool manual_redirect = std::any_of(

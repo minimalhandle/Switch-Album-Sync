@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "nso_album_sync/version.hpp"
 #include "nso_album_sync/windows_compat.hpp"
 #include <winhttp.h>
 #include <cwchar>
@@ -214,9 +215,7 @@ private:
 
 namespace sse_detail {
 
-constexpr std::size_t kMaxHeaderBytes = 64 * 1024;
 constexpr std::size_t kReadBufferBytes = 16 * 1024;
-constexpr std::size_t kMaxChunkBytes = 8 * 1024 * 1024;
 constexpr long kReadPollSeconds = 1;
 
 inline bool cancelled(const SseClient::CancelCallback& should_cancel) {
@@ -242,116 +241,6 @@ inline std::string trim_left(std::string text) {
 inline long safe_timeout(long timeout_seconds) {
     return std::clamp(timeout_seconds, 1L, 24L * 60L * 60L);
 }
-
-inline SseResponse parse_response_head(const std::string& header_text) {
-    SseResponse response;
-    std::istringstream lines(header_text);
-    std::string line;
-    if (!std::getline(lines, line)) {
-        throw std::runtime_error("Invalid SSE HTTP response");
-    }
-    if (!line.empty() && line.back() == '\r') line.pop_back();
-    std::istringstream status_line(line);
-    std::string protocol;
-    status_line >> protocol >> response.status;
-    if (protocol.rfind("HTTP/", 0) != 0 || response.status <= 0) {
-        throw std::runtime_error("Invalid SSE HTTP status line");
-    }
-    while (std::getline(lines, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const auto separator = line.find(':');
-        if (separator == std::string::npos) continue;
-        const auto name = lowercase(line.substr(0, separator));
-        const auto value = trim_left(line.substr(separator + 1));
-        const auto existing = response.headers.find(name);
-        if (name == "set-cookie" && existing != response.headers.end()) {
-            existing->second += "\n" + value;
-        } else {
-            response.headers[name] = value;
-        }
-    }
-    return response;
-}
-
-class ChunkedDecoder {
-public:
-    using DataCallback = std::function<bool(const unsigned char*, std::size_t)>;
-
-    bool feed(const unsigned char* data, std::size_t size, const DataCallback& on_data) {
-        if (done_) return true;
-        buffer_.append(reinterpret_cast<const char*>(data), size);
-        for (;;) {
-            if (reading_trailers_) {
-                const auto line_end = buffer_.find("\r\n");
-                if (line_end == std::string::npos) {
-                    if (buffer_.size() > kMaxHeaderBytes) {
-                        throw std::runtime_error("Chunked SSE trailers too large");
-                    }
-                    return true;
-                }
-                if (line_end == 0) {
-                    buffer_.erase(0, 2);
-                    done_ = true;
-                    return true;
-                }
-                buffer_.erase(0, line_end + 2);
-                continue;
-            }
-
-            if (remaining_ == 0) {
-                const auto line_end = buffer_.find("\r\n");
-                if (line_end == std::string::npos) {
-                    if (buffer_.size() > 128) {
-                        throw std::runtime_error("Invalid chunked SSE response");
-                    }
-                    return true;
-                }
-                auto length_text = buffer_.substr(0, line_end);
-                if (const auto extension = length_text.find(';');
-                    extension != std::string::npos) {
-                    length_text.resize(extension);
-                }
-                std::size_t consumed = 0;
-                std::size_t length = 0;
-                try {
-                    length = std::stoull(length_text, &consumed, 16);
-                } catch (...) {
-                    throw std::runtime_error("Invalid chunked SSE response");
-                }
-                if (consumed != length_text.size() || length > kMaxChunkBytes) {
-                    throw std::runtime_error("Invalid chunked SSE response");
-                }
-                buffer_.erase(0, line_end + 2);
-                if (length == 0) {
-                    reading_trailers_ = true;
-                    continue;
-                }
-                remaining_ = length;
-            }
-
-            if (buffer_.size() < remaining_ + 2) return true;
-            if (!on_data(
-                    reinterpret_cast<const unsigned char*>(buffer_.data()),
-                    remaining_)) {
-                return false;
-            }
-            if (buffer_[remaining_] != '\r' || buffer_[remaining_ + 1] != '\n') {
-                throw std::runtime_error("Invalid chunked SSE response");
-            }
-            buffer_.erase(0, remaining_ + 2);
-            remaining_ = 0;
-        }
-    }
-
-    bool done() const { return done_; }
-
-private:
-    std::string buffer_;
-    std::size_t remaining_ = 0;
-    bool reading_trailers_ = false;
-    bool done_ = false;
-};
-
 
 class InternetHandle {
 public:
@@ -510,8 +399,9 @@ inline SseResponse stream_windows(
     if (cancelled(should_cancel)) return {};
     const auto destination = parse_url(url);
 
+    // With no proxy configured, follow the Windows proxy settings.
     std::wstring proxy;
-    DWORD access_type = WINHTTP_ACCESS_TYPE_NO_PROXY;
+    DWORD access_type = WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY;
     LPCWSTR proxy_name = WINHTTP_NO_PROXY_NAME;
     if (!proxy_url.empty()) {
         proxy = proxy_server_from_url(proxy_url);
@@ -520,7 +410,7 @@ inline SseResponse stream_windows(
     }
 
     InternetHandle session(WinHttpOpen(
-        L"NSO Album Sync/2.0", access_type, proxy_name,
+        L"Switch Album Sync/" NSO_APP_VERSION, access_type, proxy_name,
         WINHTTP_NO_PROXY_BYPASS, 0));
     if (!session) throw_winhttp_error("WinHttpOpen");
 

@@ -273,46 +273,6 @@ std::string trim(std::string text) {
     return text;
 }
 
-std::string sanitize_folder(std::string text) {
-    if (text.empty()) {
-        return "Other";
-    }
-
-    for (char& character : text) {
-        switch (character) {
-            case '<':
-            case '>':
-            case ':':
-            case '"':
-            case '/':
-            case '\\':
-            case '|':
-            case '?':
-            case '*':
-                character = ' ';
-                break;
-            default:
-                break;
-        }
-    }
-
-    text = trim(std::move(text));
-    return text.empty() ? "Other" : text;
-}
-
-std::string normalize_title(std::string text) {
-    std::string normalized;
-    normalized.reserve(text.size());
-
-    for (const unsigned char character : text) {
-        if (std::isalnum(character)) {
-            normalized.push_back(static_cast<char>(std::tolower(character)));
-        }
-    }
-
-    return normalized;
-}
-
 std::int64_t unix_now() {
     return std::chrono::duration_cast<std::chrono::seconds>(
                std::chrono::system_clock::now().time_since_epoch())
