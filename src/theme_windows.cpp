@@ -502,6 +502,7 @@ struct DialogWindow {
     HWND checkbox = nullptr;
     HWND choices = nullptr;
     std::vector<HWND> buttons;
+    RECT choices_frame{};
     HFONT body = nullptr;
     HFONT bold = nullptr;
     UINT dpi = 96;
@@ -571,7 +572,11 @@ struct DialogWindow {
             y += px(38);
         }
         if (choices) {
-            place(choices, margin, y, inner, px(210));
+            // The list is borderless inside a drawn rounded frame.
+            choices_frame = RECT{margin, y, margin + inner, y + px(210)};
+            const int inset = px(4);
+            place(choices, margin + inset, y + inset, inner - inset * 2, px(210) - inset * 2);
+            SendMessageW(choices, LB_SETITEMHEIGHT, 0, px(30));
             y += px(224);
         }
         const int height = px(32), gap = px(8);
@@ -630,6 +635,77 @@ struct DialogWindow {
         else if (id == IDCANCEL) finish(spec->cancel_id);
     }
 
+    // Draws one option row: a checkbox (or radio dot for single choice) and
+    // the label, so a chosen option reads as ticked rather than highlighted.
+    void draw_choice(const DRAWITEMSTRUCT& item) const {
+        const HDC dc = item.hDC;
+        RECT row = item.rcItem;
+        const bool contrast = high_contrast();
+        const bool selected = (item.itemState & ODS_SELECTED) != 0;
+        const bool focused = (item.itemState & ODS_FOCUS) != 0 && !(item.itemState & ODS_NOFOCUSRECT);
+        const COLORREF background = contrast ? GetSysColor(COLOR_WINDOW) :
+            focused ? palette().control_hot : palette().field;
+        const COLORREF ink = contrast ? GetSysColor(COLOR_WINDOWTEXT) : palette().text;
+        FillRect(dc, &row, contrast ? GetSysColorBrush(COLOR_WINDOW) : brush(palette().field));
+        if (item.itemID == static_cast<UINT>(-1)) return;
+        if (focused && !contrast) {
+            RECT band = row;
+            InflateRect(&band, 0, -px(1));
+            fill_round(dc, band, px(4), background);
+        }
+
+        const int box = px(16);
+        RECT mark{row.left + px(8), row.top + (row.bottom - row.top - box) / 2, 0, 0};
+        mark.right = mark.left + box;
+        mark.bottom = mark.top + box;
+        const COLORREF on = contrast ? GetSysColor(COLOR_HIGHLIGHT) : palette().accent;
+        const COLORREF edge = contrast ? GetSysColor(COLOR_WINDOWTEXT) : palette().muted;
+        if (spec->single_choice) {
+            fill_round(dc, mark, box / 2, selected ? on : background, selected ? CLR_INVALID : edge);
+            if (selected) {
+                RECT dot = mark;
+                InflateRect(&dot, -px(5), -px(5));
+                fill_round(dc, dot, (dot.right - dot.left) / 2,
+                           contrast ? GetSysColor(COLOR_HIGHLIGHTTEXT) : RGB(255, 255, 255));
+            }
+        } else {
+            fill_round(dc, mark, px(4), selected ? on : background, selected ? CLR_INVALID : edge);
+            if (selected) {
+                Gdiplus::Graphics graphics(dc);
+                graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                Gdiplus::Pen pen(gdi(contrast ? GetSysColor(COLOR_HIGHLIGHTTEXT) : RGB(255, 255, 255)),
+                                 static_cast<float>(px(2)));
+                pen.SetStartCap(Gdiplus::LineCapRound);
+                pen.SetEndCap(Gdiplus::LineCapRound);
+                pen.SetLineJoin(Gdiplus::LineJoinRound);
+                const float x = static_cast<float>(mark.left), y = static_cast<float>(mark.top);
+                const float s = static_cast<float>(box);
+                const Gdiplus::PointF points[] = {{x + s * 0.25f, y + s * 0.52f},
+                                                  {x + s * 0.43f, y + s * 0.70f},
+                                                  {x + s * 0.76f, y + s * 0.32f}};
+                graphics.DrawLines(&pen, points, 3);
+            }
+        }
+
+        const auto length = SendMessageW(item.hwndItem, LB_GETTEXTLEN, item.itemID, 0);
+        std::wstring label(length > 0 ? static_cast<std::size_t>(length) + 1 : 1, L'\0');
+        if (length > 0) {
+            SendMessageW(item.hwndItem, LB_GETTEXT, item.itemID, reinterpret_cast<LPARAM>(label.data()));
+            label.resize(static_cast<std::size_t>(length));
+        } else {
+            label.clear();
+        }
+        RECT label_bounds = row;
+        label_bounds.left = mark.right + px(10);
+        label_bounds.right -= px(8);
+        const auto old_font = SelectObject(dc, body);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, ink);
+        DrawTextW(dc, label.c_str(), static_cast<int>(label.size()), &label_bounds,
+                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        SelectObject(dc, old_font);
+    }
+
     LRESULT message(UINT msg, WPARAM wp, LPARAM lp) {
         switch (msg) {
             case WM_ERASEBKGND: {
@@ -641,8 +717,21 @@ struct DialogWindow {
                     return TRUE;
                 }
                 FillRect(dc, &bounds, brush(palette().background));
+                if (choices) fill_round(dc, choices_frame, px(6), palette().field, palette().border);
                 bounds.bottom = px(3);
                 FillRect(dc, &bounds, brush(palette().accent));
+                return TRUE;
+            }
+            case WM_MEASUREITEM: {
+                auto* item = reinterpret_cast<MEASUREITEMSTRUCT*>(lp);
+                if (item->CtlID != kChoicesId) break;
+                item->itemHeight = px(30);
+                return TRUE;
+            }
+            case WM_DRAWITEM: {
+                const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lp);
+                if (item->CtlID != kChoicesId) break;
+                draw_choice(*item);
                 return TRUE;
             }
             case WM_CTLCOLORSTATIC:
@@ -738,7 +827,8 @@ int run_dialog(HWND owner, Dialog& spec) {
     }
     if (!spec.choices.empty()) {
         state.choices = child(L"LISTBOX", L"", WS_TABSTOP | WS_VSCROLL | WS_HSCROLL |
-            (spec.single_choice ? 0 : LBS_MULTIPLESEL) | LBS_NOINTEGRALHEIGHT, kChoicesId, WS_EX_CLIENTEDGE);
+            (spec.single_choice ? 0 : LBS_MULTIPLESEL) | LBS_NOINTEGRALHEIGHT |
+            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS, kChoicesId);
         for (const auto& choice : spec.choices) {
             if (SendMessageW(state.choices, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(choice.c_str())) < 0) {
                 DestroyWindow(window);
@@ -761,7 +851,7 @@ int run_dialog(HWND owner, Dialog& spec) {
     if (state.choices) {
         LONG extent = 0;
         for (const auto& choice : spec.choices) extent = std::max(extent, state.measure(state.body, choice, 0, false).cx);
-        SendMessageW(state.choices, LB_SETHORIZONTALEXTENT, extent + state.px(12), 0);
+        SendMessageW(state.choices, LB_SETHORIZONTALEXTENT, extent + state.px(46), 0);
     }
     state.fit(nullptr);
     apply(window);
