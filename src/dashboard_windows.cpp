@@ -43,15 +43,15 @@ bool high_contrast_enabled() {
 
 enum Control {
     Title, Subtitle, AccountHeading, AccountStatus, AccountAction,
-    CredentialNote, ClearCredential, AlbumHeading, Destination,
-    ChooseFolder, OpenFolder, LastSync, NextSync, SyncStatus, SyncDetail,
+    CredentialNote, ClearCredential, AlbumHeading,
+    ChooseFolder, OpenFolder, LastSync, SyncStatus,
     Progress, SyncNow, RetryFailed, AutoSync, CapturesHeading,
     CopyLatest, ShowInFolder, Captures, EmptyCaptures, AlbumActions, CaptureActions, DiscordSettings,
     DiscordHeading, DiscordToggle, DiscordUnavailable, CopyDiagnostics,
     Feedback, PasteSignIn, OpenLibrary, OpenHistory, OpenStorage, ImportCaptures, OpenDuplicates,
     DiscordUsername, DiscordPicture, DiscordPlayTime, DiscordZelda, DiscordAnimalCrossing,
     DiscordSplatoon3, DiscordSplatoon2, DiscordRefresh, DiscordHint,
-    DiscordProfileHeading, DiscordGamesHeading, DiscordZeldaGames, AppearanceMenu, ControlCount,
+    DiscordProfileHeading, DiscordGamesHeading, DiscordZeldaGames, ControlCount,
     ChooseWatchFolder, StopWatchingFolder, FollowWindows, LightMode, DarkMode,
     FindDuplicates, StorageCleanup, Highlights, ChooseBackup, BackupNow, StopBackup,
     AutoSyncOptions, ExportSettings, ImportSettings,
@@ -130,7 +130,7 @@ Bitmap thumbnail(const std::filesystem::path& path, SIZE size) {
     return Bitmap(image);
 }
 
-Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr) {
+Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr, bool video = false) {
     HDC screen = GetDC(nullptr);
     if (!screen) return {};
     Bitmap result(CreateCompatibleBitmap(screen, size.cx, size.cy));
@@ -154,6 +154,20 @@ Bitmap thumbnail_tile(SIZE size, HBITMAP source = nullptr) {
                            input, 0, 0, image.bmWidth, image.bmHeight, SRCCOPY);
                 SelectObject(input, old_input);
                 DeleteDC(input);
+            }
+            if (video) {
+                // A small play badge marks videos, since tiles have no labels.
+                Gdiplus::Graphics graphics(tile);
+                graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+                const float d = static_cast<float>(size.cy) * 0.36f;
+                const float x = 5.0f, y = static_cast<float>(size.cy) - d - 5.0f;
+                Gdiplus::SolidBrush shade(Gdiplus::Color(170, 0, 0, 0));
+                graphics.FillEllipse(&shade, x, y, d, d);
+                const Gdiplus::PointF play[] = {{x + d * 0.38f, y + d * 0.28f},
+                                                {x + d * 0.38f, y + d * 0.72f},
+                                                {x + d * 0.74f, y + d * 0.50f}};
+                Gdiplus::SolidBrush white(Gdiplus::Color(255, 255, 255, 255));
+                graphics.FillPolygon(&white, play, 3);
             }
         } else {
             SetBkMode(tile, TRANSPARENT);
@@ -229,7 +243,9 @@ private:
                     if (generation_ != request.generation) break;
                 }
                 const auto image = thumbnail(path, request.size);
-                batch.images.push_back(thumbnail_tile(request.size, image.get()));
+                const auto extension = path.extension().wstring();
+                const bool video = CompareStringOrdinal(extension.c_str(), -1, L".mp4", -1, TRUE) == CSTR_EQUAL;
+                batch.images.push_back(thumbnail_tile(request.size, image.get(), video));
             }
             std::lock_guard lock(mutex_);
             if (!stop.stop_requested() && generation_ == request.generation) {
@@ -333,15 +349,12 @@ struct WindowsDashboard::Impl {
         label(Title, kTitle);
         label(Subtitle, L"Sync your Nintendo Switch album to this PC.");
         button(OpenLibrary, L"Open library");
+        button(OpenFolder, L"Open folder");
         button(ImportCaptures, L"Import USB / SD…");
-        button(AlbumActions, L"Album tools ▾");
-        button(AppearanceMenu, L"Appearance ▾");
+        button(AlbumActions, L"More ▾");
         label(AlbumHeading, L"Album sync");
-        control(Destination, L"EDIT", L"", WS_TABSTOP | ES_READONLY | ES_AUTOHSCROLL);
-        label(LastSync);
-        label(NextSync);
+        label(LastSync, L"", SS_RIGHT);
         label(SyncStatus);
-        label(SyncDetail);
         control(Progress, PROGRESS_CLASSW, L"", PBS_SMOOTH);
         button(SyncNow, L"Sync now", BS_DEFPUSHBUTTON);
         button(RetryFailed, L"Retry failed");
@@ -350,7 +363,7 @@ struct WindowsDashboard::Impl {
         button(CaptureActions, L"Capture actions ▾");
         control(Captures, WC_LISTVIEWW, L"Recent captures",
                 WS_TABSTOP | LVS_ICON | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_AUTOARRANGE |
-                LVS_SHAREIMAGELISTS | LVS_NOLABELWRAP);
+                LVS_SHAREIMAGELISTS | LVS_NOLABELWRAP | LVS_NOSCROLL);
         ListView_SetExtendedListViewStyle(controls[Captures], LVS_EX_DOUBLEBUFFER | LVS_EX_INFOTIP);
         label(EmptyCaptures);
         label(AccountHeading, L"Nintendo Account");
@@ -360,7 +373,7 @@ struct WindowsDashboard::Impl {
         label(CredentialNote);
         button(ClearCredential, L"Clear saved credential");
         label(DiscordHeading, L"Discord Rich Presence");
-        button(DiscordToggle, L"Enable Rich Presence", BS_AUTOCHECKBOX);
+        button(DiscordToggle, L"Show what I’m playing", BS_AUTOCHECKBOX);
         button(DiscordSettings, L"Settings ▾");
         for (const auto& option : kDiscordOptions) button(option.control, option.label, BS_AUTOCHECKBOX);
         button(DiscordRefresh, L"Refresh presence");
@@ -394,8 +407,6 @@ struct WindowsDashboard::Impl {
             SendMessageW(controls[id], WM_SETFONT, reinterpret_cast<WPARAM>(heading), TRUE);
         }
         SendMessageW(controls[Title], WM_SETFONT, reinterpret_cast<WPARAM>(title), TRUE);
-        SendMessageW(controls[Destination], EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
-                     MAKELPARAM(px(5), px(5)));
         if (old_body) DeleteObject(old_body);
         if (old_heading) DeleteObject(old_heading);
         if (old_title) DeleteObject(old_title);
@@ -408,11 +419,56 @@ struct WindowsDashboard::Impl {
     struct Arrangement {
         std::vector<Placement> items;
         std::vector<std::pair<int, int>> cards;  // top and bottom of each section panel
-        std::vector<RECT> fields;  // rounded frames drawn behind borderless fields
+        std::vector<int> dividers;  // hairlines between rows that share a card
         int height = 0;
     };
     std::vector<std::pair<int, int>> cards;
-    std::vector<RECT> fields;
+    std::vector<int> dividers;
+
+    // "21:56 (2026-11-12)" reads as "21:56" when it is today.
+    static std::wstring short_time(const std::string& value) {
+        auto text = wide(value);
+        SYSTEMTIME now{};
+        GetLocalTime(&now);
+        wchar_t today[16]{};
+        swprintf_s(today, L"(%04u-%02u-%02u)", now.wYear, now.wMonth, now.wDay);
+        if (text.size() == 18 && text.compare(6, 12, today) == 0) text.resize(5);
+        return text;
+    }
+
+    // One muted line beside the auto-sync toggle: when it last ran and, while
+    // auto-sync is on, when it runs next.
+    std::wstring schedule_text() const {
+        auto result = L"Last sync " + short_time(state.last_sync);
+        if (!state.auto_sync || !state.signed_in) return result;
+        const auto next = short_time(state.next_sync);
+        const bool time = !next.empty() && iswdigit(next.front());
+        return result + L"  ·  " + (time ? L"Next " + next : next);
+    }
+
+    // The status with any counts from the last run appended, e.g.
+    // "Album is up to date  ·  17 new".
+    std::wstring status_text() const {
+        auto result = wide(state.status);
+        const auto detail = wide(state.sync_detail);
+        if (!detail.empty()) result += (result.empty() ? L"" : L"  ·  ") + detail;
+        return result;
+    }
+
+    // Height in 96 DPI units for the status line, which wraps when long.
+    int status_height(int width) const {
+        const auto value = status_text();
+        if (!window || value.empty()) return 20;
+        HDC dc = GetDC(window);
+        if (!dc) return 20;
+        const auto old = SelectObject(dc, body);
+        RECT bounds{0, 0, px(width), 0};
+        DrawTextW(dc, value.c_str(), static_cast<int>(value.size()), &bounds,
+                  DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        SelectObject(dc, old);
+        ReleaseDC(window, dc);
+        return std::max(20, MulDiv(bounds.bottom - bounds.top, 96, static_cast<int>(dpi)) + 2);
+    }
 
     // Builds the dashboard from top to bottom. Each section is a card and each
     // row advances the cursor, so resizing a row moves everything below it.
@@ -432,9 +488,9 @@ struct WindowsDashboard::Impl {
 
         y = kBannerHeight + 10;
         put(OpenLibrary, left, y, 112, 32);
-        put(ImportCaptures, left + 120, y, 140, 32);
-        put_right(AlbumActions, 126, y, 126, 32);
-        put_right(AppearanceMenu, 252, y, 118, 32);
+        put(OpenFolder, left + 120, y, 108, 32);
+        put(ImportCaptures, left + 236, y, 140, 32);
+        put_right(AlbumActions, 88, y, 88, 32);
         y += 44;
 
         int card_top = 0;
@@ -452,25 +508,16 @@ struct WindowsDashboard::Impl {
         put(AlbumHeading, left, y + 5, span - 222, 22);
         put_right(SyncNow, 106, y, 106, 32);
         put_right(RetryFailed, 218, y, 104, 32);
-        y += 42;
-        put(SyncStatus, left, y, span, 38);
-        y += 38;
-        if (!state.sync_detail.empty()) {
-            put(SyncDetail, left, y, span, 20);
-            y += 24;
-        }
+        y += 40;
+        const int status = status_height(span);
+        put(SyncStatus, left, y, span, status);
+        y += status + 6;
         if (state.sync_busy) {
-            put(Progress, left, y, span, 8);
-            y += 16;
+            put(Progress, left, y, span, 6);
+            y += 14;
         }
-        // The read-only path sits inside a drawn rounded field.
-        result.fields.push_back(RECT{left, y, left + span, y + 28});
-        put(Destination, left + 4, y + 5, span - 8, 19);
-        y += 36;
-        put(LastSync, left, y, half - 8, 21);
-        put(NextSync, left + half, y, half, 21);
-        y += 23;
         put(AutoSync, left, y, 184, 27);
+        put(LastSync, left + 192, y + 4, span - 192, 21);
         y += 27;
         close_card();
 
@@ -479,32 +526,37 @@ struct WindowsDashboard::Impl {
         put_right(CaptureActions, 145, y - 3, 145, 28);
         put_right(Feedback, 303, y + 2, 150, 24);
         y += 32;
-        put(Captures, left, y, span, 103);
+        put(Captures, left, y, span, kThumbnailHeight + 6);
         put(EmptyCaptures, left, y + 6, span, 42);
-        y += state.recent_captures.empty() ? 45 : 103;
+        y += state.recent_captures.empty() ? 45 : kThumbnailHeight + 6;
         close_card();
 
+        // Nintendo Account and Discord share one card: a row each, with the
+        // longer explanations only while something needs attention.
         open_card();
-        put(AccountHeading, left, y + 2, span - 130, 20);
-        put_right(AccountAction, 118, y + 2, 118, 29);
-        put_right(PasteSignIn, 280, y + 2, 153, 29);
-        y += 25;
-        put(AccountStatus, left, y, span - (state.manual_sign_in ? 289 : 130), 30);
-        y += 30;
-        if (!state.signed_in || state.credential_warning) {
-            put(CredentialNote, left, y, span - (state.legacy_credential ? 177 : 0), 36);
-            put_right(ClearCredential, 166, y, 166, 28);
-            y += 36;
+        constexpr int kLabelWidth = 176;
+        const bool status_below = state.manual_sign_in || state.sign_in_pending;
+        put(AccountHeading, left, y + 5, kLabelWidth, 22);
+        put_right(AccountAction, 118, y, 118, 32);
+        put_right(PasteSignIn, 280, y, 153, 32);
+        if (!status_below) put(AccountStatus, left + kLabelWidth, y + 6, span - kLabelWidth - 126, 21);
+        y += 32;
+        if (status_below) {
+            put(AccountStatus, left, y + 4, span, 21);
+            y += 26;
         }
-        close_card();
-
-        open_card();
-        put(DiscordHeading, left, y + 1, span - 128, 22);
-        put_right(DiscordSettings, 112, y, 112, 29);
-        y += 24;
-        put(DiscordToggle, left, y, span - 128, 25);
-        put(DiscordUnavailable, left, y + 3, span - 128, 20);
-        y += 25;
+        if (!state.signed_in || state.credential_warning) {
+            put(CredentialNote, left, y + 4, span - (state.legacy_credential ? 177 : 0), 36);
+            put_right(ClearCredential, 166, y + 4, 166, 28);
+            y += 40;
+        }
+        result.dividers.push_back(y + 8);
+        y += 16;
+        put(DiscordHeading, left, y + 5, kLabelWidth, 22);
+        put(DiscordToggle, left + kLabelWidth, y + 3, span - kLabelWidth - 126, 26);
+        put(DiscordUnavailable, left + kLabelWidth, y + 6, span - kLabelWidth - 126, 21);
+        put_right(DiscordSettings, 112, y, 112, 32);
+        y += 32;
         if (discord_expanded()) {
             y += 5;
             put(DiscordProfileHeading, left, y, half - 8, 21);
@@ -529,6 +581,13 @@ struct WindowsDashboard::Impl {
         return result;
     }
 
+    // Right edge of the content in 96 DPI units for the current window width.
+    int content_right() const {
+        RECT client{};
+        GetClientRect(window, &client);
+        return std::max(kMinimumWidth - kMargin, MulDiv(client.right, 96, static_cast<int>(dpi)) - kMargin);
+    }
+
     void layout(int desired_scroll, bool scrolling = false) {
         RECT client{};
         GetClientRect(window, &client);
@@ -540,12 +599,9 @@ struct WindowsDashboard::Impl {
         info.nPos = desired_scroll;
         SetScrollInfo(window, SB_VERT, &info, TRUE);
         scroll = GetScrollPos(window, SB_VERT);
-        GetClientRect(window, &client);
-        const int right = std::max(kMinimumWidth - kMargin,
-                                  MulDiv(client.right, 96, static_cast<int>(dpi)) - kMargin);
-        const auto plan = arrange(right);
+        const auto plan = arrange(content_right());
         cards = plan.cards;
-        fields = plan.fields;
+        dividers = plan.dividers;
         const auto place = [&](const Placement& item, HDWP batch) {
             const auto& r = item.bounds;
             constexpr UINT flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOREDRAW;
@@ -566,50 +622,6 @@ struct WindowsDashboard::Impl {
         RedrawWindow(window, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 
-    // Drops the series prefix and edition suffix that would otherwise make
-    // every label in a series read the same once shortened, e.g.
-    // "The Legend of Zelda: Tears of the Kingdom - Nintendo Switch 2 Edition"
-    // becomes "Tears of the Kingdom".
-    static std::wstring short_game_name(std::wstring name) {
-        const auto strip_prefix = [&](std::wstring_view prefix) {
-            if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0) return;
-            auto rest = name.substr(prefix.size());
-            const auto start = rest.find_first_not_of(L": ");
-            if (start != std::wstring::npos) name = rest.substr(start);
-        };
-        for (const auto suffix : {std::wstring_view(L" - Nintendo Switch 2 Edition"),
-                                  std::wstring_view(L" Nintendo Switch 2 Edition")}) {
-            if (name.size() > suffix.size() &&
-                name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0) {
-                name.resize(name.size() - suffix.size());
-                break;
-            }
-        }
-        strip_prefix(L"The Legend of Zelda");
-        return name;
-    }
-
-    // Shortens a thumbnail label with an ellipsis so it fits under its tile.
-    // The list view itself would let single-line labels overflow and scroll.
-    std::wstring fit_label(std::wstring label, int width) const {
-        HDC dc = GetDC(controls[Captures]);
-        if (!dc) return label;
-        const auto old = SelectObject(dc, body);
-        const auto fits = [&](const std::wstring& value) {
-            SIZE size{};
-            GetTextExtentPoint32W(dc, value.c_str(), static_cast<int>(value.size()), &size);
-            return size.cx <= width;
-        };
-        if (!fits(label)) {
-            while (!label.empty() && !fits(label + L"…")) label.pop_back();
-            while (!label.empty() && label.back() == L' ') label.pop_back();
-            label += L"…";
-        }
-        SelectObject(dc, old);
-        ReleaseDC(controls[Captures], dc);
-        return label;
-    }
-
     void refresh_captures(bool force = false) {
         const auto count = std::min(state.recent_captures.size(), kThumbnailCount);
         std::vector paths(state.recent_captures.begin(), state.recent_captures.begin() + count);
@@ -624,32 +636,23 @@ struct WindowsDashboard::Impl {
         const SIZE size{px(kThumbnailWidth), px(kThumbnailHeight)};
         images = ImageList_Create(size.cx, size.cy, ILC_COLOR32, static_cast<int>(count), 1);
         ListView_SetImageList(controls[Captures], images, LVSIL_NORMAL);
-        ListView_SetIconSpacing(controls[Captures], px(108), px(101));
+        // Thumbnails carry no labels: the tip names the game and file, and
+        // videos get a play badge on the tile.
+        ListView_SetIconSpacing(controls[Captures], px(kThumbnailWidth + 12), px(kThumbnailHeight + 12));
 
         const auto blank = thumbnail_tile(size);
-        int select_index = 0;
+        int select_index = -1;
         for (std::size_t i = 0; i < count; ++i) {
-            if (shown_captures[i] == selection) select_index = static_cast<int>(i);
+            if (!selection.empty() && shown_captures[i] == selection) select_index = static_cast<int>(i);
             const int image = blank && images ? ImageList_Add(images, blank.get(), nullptr) : -1;
-            // Captures are stored in a folder per game, so the folder names
-            // the game; captures left in the album root fall back to a type.
-            const auto extension = shown_captures[i].extension().wstring();
-            const bool video = CompareStringOrdinal(extension.c_str(), -1, L".mp4", -1, TRUE) == CSTR_EQUAL;
-            const auto folder = shown_captures[i].parent_path();
-            const bool sorted = !folder.empty() &&
-                folder.lexically_normal() != state.destination.lexically_normal();
-            std::wstring caption = sorted ? short_game_name(folder.filename().wstring()) :
-                video ? L"Video" : L"Screenshot";
-            if (sorted && video) caption = L"▶ " + caption;
-            caption = fit_label(caption, px(kThumbnailWidth + 4));
             LVITEMW item{};
-            item.mask = LVIF_TEXT | LVIF_IMAGE;
+            item.mask = LVIF_IMAGE;
             item.iItem = static_cast<int>(i);
             item.iImage = image;
-            item.pszText = caption.data();
             ListView_InsertItem(controls[Captures], &item);
         }
-        if (count > 0) {
+        // Keep a selection the user made; otherwise nothing starts selected.
+        if (select_index >= 0) {
             ListView_SetItemState(controls[Captures], select_index,
                 LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
         }
@@ -669,10 +672,13 @@ struct WindowsDashboard::Impl {
         const bool resize = state.discord_available != next.discord_available ||
             state.signed_in != next.signed_in || state.credential_warning != next.credential_warning ||
             state.recent_captures.empty() != next.recent_captures.empty();
-        const bool relayout = state.manual_sign_in != next.manual_sign_in ||
-            state.sync_busy != next.sync_busy || state.sync_detail.empty() != next.sync_detail.empty() ||
-            state.legacy_credential != next.legacy_credential;
+        const int old_status_height = window ? status_height(content_right() - kMargin) : 0;
+        bool relayout = state.manual_sign_in != next.manual_sign_in ||
+            state.sign_in_pending != next.sign_in_pending ||
+            state.sync_busy != next.sync_busy || state.legacy_credential != next.legacy_credential;
         state = next;
+        // A status that wraps onto another line (or stops wrapping) moves the rows below it.
+        if (window && status_height(content_right() - kMargin) != old_status_height) relayout = true;
         library.update(state);
         if (!window) return;
 
@@ -691,16 +697,13 @@ struct WindowsDashboard::Impl {
         ShowWindow(controls[ClearCredential], state.legacy_credential ? SW_SHOWNA : SW_HIDE);
         ShowWindow(controls[CredentialNote], !state.signed_in || state.credential_warning ? SW_SHOWNA : SW_HIDE);
 
-        text(Destination, state.destination.wstring());
-        text(LastSync, L"Last sync  ·  " + wide(state.last_sync));
-        text(NextSync, L"Next sync  ·  " + wide(state.next_sync));
-        text(SyncStatus, wide(state.status));
-        text(SyncDetail, wide(state.sync_detail));
+        text(LastSync, schedule_text());
+        text(SyncStatus, status_text());
+        EnableWindow(controls[OpenFolder], !state.destination.empty());
         EnableWindow(controls[SyncNow], state.signed_in && !state.sync_busy);
         EnableWindow(controls[ImportCaptures], !state.sync_busy);
         ShowWindow(controls[RetryFailed], state.retry_available ? SW_SHOWNA : SW_HIDE);
         EnableWindow(controls[RetryFailed], state.signed_in && !state.sync_busy);
-        ShowWindow(controls[SyncDetail], state.sync_detail.empty() ? SW_HIDE : SW_SHOWNA);
         SendMessageW(controls[AutoSync], BM_SETCHECK, state.auto_sync ? BST_CHECKED : BST_UNCHECKED, 0);
         text(AutoSync, L"Auto-sync (" + std::to_wstring(state.sync_interval_minutes) + L" min)");
 
@@ -765,7 +768,6 @@ struct WindowsDashboard::Impl {
             add(OpenStorage, L"Storage");
             add(OpenDuplicates, L"Duplicate review");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-            add(OpenFolder, L"Open album folder", !state.destination.empty());
             add(ChooseFolder, L"Change album folder…");
             add(ChooseWatchFolder, state.watching_folder ? L"Change watched folder…" : L"Watch a folder…");
             if (state.watching_folder) add(StopWatchingFolder, L"Stop watching folder");
@@ -782,17 +784,21 @@ struct WindowsDashboard::Impl {
             add(Highlights, L"Highlights grid…", has_captures);
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             add(AutoSyncOptions, L"Auto-sync options…");
+            if (HMENU appearance = CreatePopupMenu()) {
+                const auto add_mode = [&](Control id, const wchar_t* label, Appearance mode) {
+                    AppendMenuW(appearance, MF_STRING | (state.appearance == mode ? MF_CHECKED : MF_UNCHECKED),
+                                2000 + id, label);
+                };
+                add_mode(FollowWindows, L"Follow Windows", Appearance::system);
+                add_mode(LightMode, L"Light", Appearance::light);
+                add_mode(DarkMode, L"Dark", Appearance::dark);
+                // The menu owns the submenu, so DestroyMenu below frees both.
+                AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(appearance), L"Appearance");
+            }
             add(ExportSettings, L"Export settings…");
             add(ImportSettings, L"Import settings…");
             AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
             add(CopyDiagnostics, L"Copy diagnostics", !state.diagnostics.empty());
-        } else if (anchor == AppearanceMenu) {
-            const auto add_mode = [&](Control id, const wchar_t* label, Appearance mode) {
-                AppendMenuW(menu, MF_STRING | (state.appearance == mode ? MF_CHECKED : MF_UNCHECKED), 2000 + id, label);
-            };
-            add_mode(FollowWindows, L"Follow Windows", Appearance::system);
-            add_mode(LightMode, L"Light", Appearance::light);
-            add_mode(DarkMode, L"Dark", Appearance::dark);
         } else {
             add(CopyLatest, L"Copy latest capture", !shown_captures.empty());
             add(ShowInFolder, L"Show selected capture in folder", !selected_capture().empty());
@@ -814,7 +820,6 @@ struct WindowsDashboard::Impl {
         }
         switch (id) {
             case AlbumActions:
-            case AppearanceMenu:
             case CaptureActions: show_actions(id); break;
             case FollowWindows: case LightMode: case DarkMode: {
                 const auto mode = id == LightMode ? Appearance::light :
@@ -1005,10 +1010,10 @@ struct WindowsDashboard::Impl {
                                           px(14), theme::palette().card, theme::palette().card_border);
                     };
                     for (const auto& [top, bottom] : cards) card(top, bottom);
-                    for (const auto& field : fields) {
-                        theme::fill_round(dc, RECT{px(field.left), px(field.top) - scroll, px(field.right),
-                                                   px(field.bottom) - scroll},
-                                          px(6), theme::palette().field, theme::palette().border);
+                    for (const int divider : dividers) {
+                        const RECT line{px(kMargin), px(divider) - scroll, right - px(kMargin - 12),
+                                        px(divider) - scroll + std::max(1, px(1))};
+                        FillRect(dc, &line, theme::brush(theme::palette().card_border));
                     }
                     // A small red mark beside the title carries the Nintendo accent.
                     theme::fill_round(dc, RECT{px(12), px(24) - scroll, px(16), px(48) - scroll},
@@ -1020,7 +1025,7 @@ struct WindowsDashboard::Impl {
                 if (high_contrast_enabled()) return DefWindowProcW(window, msg, wp, lp);
                 const auto child = reinterpret_cast<HWND>(lp);
                 const bool header = child == controls[OpenLibrary] || child == controls[ImportCaptures] ||
-                    child == controls[AlbumActions] || child == controls[AppearanceMenu];
+                    child == controls[AlbumActions] || child == controls[OpenFolder];
                 return theme::control_color(msg, wp, lp, header ? theme::palette().background : theme::palette().card);
             }
             case WM_CTLCOLOREDIT:
@@ -1040,7 +1045,7 @@ struct WindowsDashboard::Impl {
                     return reinterpret_cast<LRESULT>(theme::brush(theme::palette().background));
                 }
                 const auto result = theme::control_color(msg, wp, lp, theme::palette().card);
-                for (const auto id : {CredentialNote, LastSync, NextSync, SyncDetail, EmptyCaptures,
+                for (const auto id : {CredentialNote, LastSync, AccountStatus, EmptyCaptures,
                                       DiscordHint, DiscordZeldaGames, DiscordUnavailable, Feedback}) {
                     if (child == controls[id]) SetTextColor(dc, theme::palette().muted);
                 }

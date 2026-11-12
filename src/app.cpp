@@ -118,9 +118,13 @@ const char* failure_message(SyncFailure failure) {
     return "Sync failed. Try again.";
 }
 
-std::string sync_counts(int downloaded, int skipped, int failed) {
-    return std::to_string(downloaded) + " new, " + std::to_string(skipped) +
-        " skipped, " + std::to_string(failed) + " failed";
+// Only what changed: captures already on this PC aren't news, so they're left
+// out, and a sync with nothing new reports nothing.
+std::string sync_counts(int downloaded, int failed) {
+    std::string result;
+    if (downloaded > 0) result = std::to_string(downloaded) + " new";
+    if (failed > 0) result += (result.empty() ? "" : ", ") + std::to_string(failed) + " failed";
+    return result;
 }
 
 bool presence_enabled(const AppConfig& config) {
@@ -254,8 +258,10 @@ void App::update_menu() {
         menu.diagnostics += discord_available ? "Discord support: yes\n" : "Discord support: no\n";
         menu.diagnostics += "Latest event: " + diagnostic_code_ + "\n";
         if (!last_error_.empty()) menu.diagnostics += "Latest error: " + last_error_ + "\n";
-        menu.diagnostics += "Latest sync: " + sync_counts(
-            sync_progress_.new_downloads, sync_progress_.skipped, sync_progress_.failed) + "\n";
+        // Diagnostics keep every count, including captures already present.
+        menu.diagnostics += "Latest sync: " + std::to_string(sync_progress_.new_downloads) + " new, " +
+            std::to_string(sync_progress_.skipped) + " skipped, " +
+            std::to_string(sync_progress_.failed) + " failed\n";
     }
     menu.auto_sync = config.auto_sync;
     menu.notifications = config.notifications;
@@ -383,7 +389,7 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
                 if (progress.stage == SyncStage::downloading) {
                     status_ = "Downloading captures…";
                     diagnostic_code_ = "downloading_captures";
-                    sync_detail_ = sync_counts(progress.new_downloads, progress.skipped, progress.failed);
+                    sync_detail_ = sync_counts(progress.new_downloads, progress.failed);
                 }
             }
             update_menu();
@@ -485,12 +491,12 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         sync_progress_.skipped = result.skipped;
         sync_progress_.failed = result.failed;
         sync_detail_ = result.fatal ? std::string{} :
-            sync_counts(result.new_downloads, result.skipped, result.failed);
+            sync_counts(result.new_downloads, result.failed);
         if (result.unavailable > 0) {
-            sync_detail_ += ", " + std::to_string(result.unavailable) + " no longer available";
+            sync_detail_ += (sync_detail_.empty() ? "" : ", ") + std::to_string(result.unavailable) + " no longer available";
         }
         if (result.review > 0) {
-            sync_detail_ += ", " + std::to_string(result.review) + " ready in Duplicate review";
+            sync_detail_ += (sync_detail_.empty() ? "" : ", ") + std::to_string(result.review) + " ready in Duplicate review";
         }
         if (complete) {
             if (request != SyncRequest::automatic_retry && capture.empty()) last_sync_ = sync_time;
@@ -499,7 +505,7 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
                 saved ? "Album is up to date" : "Album synced. Could not save the sync timestamp.";
             diagnostic_code_ = saved ? "sync_complete" : "settings_write_failed";
             if (result.new_downloads > 0 || result.review > 0 || request != SyncRequest::automatic) {
-                notification = status_ + ". " + sync_detail_ + ".";
+                notification = status_ + (sync_detail_.empty() ? "." : ". " + sync_detail_ + ".");
             }
         } else if (result.failure != SyncFailure::none) {
             diagnostic_code_ = failure_code(result.failure);
@@ -931,6 +937,12 @@ void App::sign_in_or_out() {
         manual_sign_in_ = !automatic_return;
         auth_pending_ = true;
         {
+            // Taking the lock orders this with the callback loop's check, so
+            // the wake-up can't slip in between its check and its wait.
+            std::lock_guard sleep_lock(sleep_mutex_);
+        }
+        sleep_cv_.notify_all();
+        {
             std::lock_guard state_lock(state_mutex_);
             status_ = automatic_return ? "Waiting for Nintendo Account sign-in in your browser…" :
                 "Finish signing in on Nintendo’s website, then use Paste sign-in link in Switch Album Sync.";
@@ -1191,7 +1203,15 @@ void App::auth_callback_loop() {
             if (auth_pending_ && !manual_sign_in_) complete_pending_login(*callback);
         }
         std::unique_lock sleep_lock(sleep_mutex_);
-        sleep_cv_.wait_for(sleep_lock, kAuthCallbackPollInterval);
+        if (auth_pending_ || manual_sign_in_) {
+            sleep_cv_.wait_for(sleep_lock, kAuthCallbackPollInterval);
+        } else {
+            // Nothing to look for until a sign-in starts, so sleep instead of
+            // waking every 150 ms for the life of the app.
+            sleep_cv_.wait(sleep_lock, [this] {
+                return stopping_ || auth_pending_ || manual_sign_in_;
+            });
+        }
     }
 }
 
