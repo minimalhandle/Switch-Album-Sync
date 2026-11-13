@@ -44,12 +44,13 @@ set(
 )
 # Sent as X-znca-Client-Version; must be fixed, never set at runtime. nxapi now
 # rejects 3.0.x values for current Nintendo Switch Online versions
-# (incompatible_client), and nxapi-auth doesn't yet issue per-client values.
-# Until it does, builds use the compatibility value nxapi's own client
-# publishes (ZNCA_API_COMPATIBILITY_VERSION in nxapi src/api/coral.ts).
+# (incompatible_client). The value below is the compatibility version for
+# Nintendo Switch Online 3.6.0, announced by nxapi for
+# this app. Update it when nxapi moves to a new NSO version or issues
+# per-client values.
 set(
     NSO_ZNCA_CLIENT_VERSION
-    "d8fAZDPzwimzQ7c6"
+    "2k7EnRvh__pWRtnN"
     CACHE STRING
     "Fixed X-znca-Client-Version value for nxapi-znca-api"
 )
