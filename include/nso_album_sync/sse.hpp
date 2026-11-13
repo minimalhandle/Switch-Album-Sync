@@ -16,6 +16,7 @@
 #include <utility>
 #include <vector>
 
+#include "nso_album_sync/http.hpp"
 #include "nso_album_sync/version.hpp"
 #include "nso_album_sync/windows_compat.hpp"
 #include <winhttp.h>
@@ -302,9 +303,20 @@ inline std::string wide_to_utf8(const std::wstring& text) {
 }
 
 [[noreturn]] inline void throw_winhttp_error(const char* operation) {
-    throw std::runtime_error(
-        std::string(operation) + " failed (WinHTTP error " +
-        std::to_string(GetLastError()) + ")");
+    const auto code = GetLastError();
+    const auto message = std::string(operation) + " failed (WinHTTP error " +
+        std::to_string(code) + ")";
+    // Same classification as HttpClient: only a connection that failed or
+    // dropped without a reply may be retried automatically.
+    switch (code) {
+        case ERROR_WINHTTP_TIMEOUT:
+        case ERROR_WINHTTP_CANNOT_CONNECT:
+        case ERROR_WINHTTP_CONNECTION_ERROR:
+        case ERROR_WINHTTP_NAME_NOT_RESOLVED:
+            throw TransientHttpError(message);
+        default:
+            throw std::runtime_error(message);
+    }
 }
 
 inline ParsedUrl parse_url(const std::string& url) {
@@ -508,6 +520,7 @@ inline SseResponse SseClient::stream(
     long connect_timeout_seconds,
     std::size_t max_event_bytes) const {
     if (!on_event) throw std::invalid_argument("SSE event callback is empty");
+    count_request(url);
     return sse_detail::stream_windows(
         url, proxy(), headers, on_event, should_cancel,
         connect_timeout_seconds, max_event_bytes);

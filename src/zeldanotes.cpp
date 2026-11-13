@@ -34,8 +34,18 @@ void log_zelda(const std::string& msg) {
 }
 
 constexpr char kBaseUrl[] = "https://api.lp1.87abc152.srv.nintendo.net";
-constexpr char kUserAgent[] =
-    "Mozilla/5.0 (Linux; Android 10; Build/QP1A.190711.020; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/80.0.3987.162 Mobile Safari/537.36 com.nintendo.znca/3.5.0";
+// The Nintendo Switch Online app's WebView appends its own version. It comes
+// from nxapi's supported version (zelda_notes_set_app_version), so it never
+// goes stale; 3.6.0 is only the fallback before that's known.
+constexpr char kUserAgentPrefix[] =
+    "Mozilla/5.0 (Linux; Android 10; Build/QP1A.190711.020; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/80.0.3987.162 Mobile Safari/537.36 com.nintendo.znca/";
+std::mutex g_app_version_mutex;
+std::string g_app_version = "3.6.0";
+
+std::string user_agent() {
+    std::lock_guard lock(g_app_version_mutex);
+    return kUserAgentPrefix + g_app_version;
+}
 constexpr auto kSessionTtl = std::chrono::minutes(90);
 constexpr char kPorterSessionAlphabet[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -64,7 +74,6 @@ struct WebMetadata {
     std::string end_action;
     std::string ack_action;
     std::string deployment_id;
-    std::string custom_avatar_url;
     std::map<std::string, std::string> labels;
     std::vector<MapPlace> places;
     std::map<std::pair<std::string, std::string>, std::string> ocarina_locations;
@@ -206,7 +215,7 @@ std::vector<std::string> bootstrap_headers(
     const std::string& country) {
     return {
         "Upgrade-Insecure-Requests: 1",
-        std::string("User-Agent: ") + kUserAgent,
+        "User-Agent: " + user_agent(),
         "x-appplatform: android",
         "x-appcolorscheme: DARK",
         "x-gamewebtoken: " + token,
@@ -232,7 +241,7 @@ std::vector<std::string> authenticated_headers(
     const std::string& country,
     const std::string& accept) {
     return {
-        std::string("User-Agent: ") + kUserAgent,
+        "User-Agent: " + user_agent(),
         "Accept: " + accept,
         "Accept-Language: " + language,
         "X-NACountry: " + country,
@@ -281,25 +290,6 @@ std::string route_url(ZeldaNotesGame game) {
     const auto* short_name = zelda_notes_short_name(game);
     if (short_name == nullptr || *short_name == '\0') return {};
     return std::string(kBaseUrl) + "/" + short_name + "/complete-guide";
-}
-
-std::string percent_decode(const std::string& value) {
-    std::string output;
-    output.reserve(value.size());
-    for (std::size_t i = 0; i < value.size(); ++i) {
-        if (value[i] == '%' && i + 2 < value.size()) {
-            const char hex[3] = {value[i + 1], value[i + 2], '\0'};
-            char* end = nullptr;
-            const auto byte_val = std::strtoul(hex, &end, 16);
-            if (end == hex + 2) {
-                output += static_cast<char>(byte_val);
-                i += 2;
-                continue;
-            }
-        }
-        output += value[i];
-    }
-    return output;
 }
 
 std::string percent_encode(const std::string& value) {
@@ -634,7 +624,14 @@ WebMetadata discover_web_metadata(
 
     const auto scripts = extract_script_urls(html);
     std::size_t scripts_read = 0;
+    const auto have_dataset = [&] {
+        return game == ZeldaNotesGame::OcarinaOfTime
+            ? !metadata.ocarina_locations.empty() : !metadata.places.empty();
+    };
     for (const auto& script_url : scripts) {
+        // Stop downloading scripts once the map-sync actions and the map
+        // dataset are both known; the rest aren't needed.
+        if (metadata.protocol_ready() && have_dataset() && !metadata.deployment_id.empty()) break;
         if (game == ZeldaNotesGame::OcarinaOfTime && debug_logging_enabled()) {
             // Only log static asset paths. Omit query parameters and cookies.
             const auto end = script_url.find('?');
@@ -704,48 +701,6 @@ WebMetadata discover_web_metadata(
         " end=" + metadata.end_action +
         " ack=" + metadata.ack_action +
         " dpl=" + metadata.deployment_id);
-
-    // Look for custom UGC avatar in complete-guide HTML
-    auto find_ugc_avatar = [&](const std::string& source) -> std::string {
-        const auto marker = source.find("storage.googleapis.com");
-        if (marker == std::string::npos) return {};
-        auto start = source.rfind("url=", marker);
-        if (start != std::string::npos) {
-            start += 4;
-            auto end = source.find_first_of("&\"' ", start);
-            if (end != std::string::npos) {
-                return percent_decode(html_unescape(source.substr(start, end - start)));
-            }
-        }
-        auto start_direct = source.rfind("https://storage.googleapis.com", marker);
-        if (start_direct != std::string::npos) {
-            auto end_direct = source.find_first_of("\"' ", start_direct);
-            if (end_direct != std::string::npos) {
-                return html_unescape(source.substr(start_direct, end_direct - start_direct));
-            }
-        }
-        return {};
-    };
-
-    metadata.custom_avatar_url = find_ugc_avatar(html);
-
-    // If not found in complete-guide, check profile page
-    if (game != ZeldaNotesGame::OcarinaOfTime && metadata.custom_avatar_url.empty()) {
-        const auto profile_url = std::string(kBaseUrl) + "/" + zelda_notes_short_name(game) + "/profile";
-        const auto profile_page = http.get(
-            profile_url,
-            authenticated_headers(
-                session, language, country,
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
-            8,
-            kMaxRouteHtmlBytes);
-        if (profile_page.status == 200) {
-            metadata.custom_avatar_url = find_ugc_avatar(profile_page.text());
-        }
-    }
-    if (!metadata.custom_avatar_url.empty()) {
-        log_zelda("discover_web_metadata: custom avatar available");
-    }
 
     try {
         metadata.labels = fetch_labels(http, game, session, language, country);
@@ -1384,6 +1339,13 @@ void zelda_notes_note_discord_presence(
     client->set_active_game(game);
 }
 
+void zelda_notes_set_app_version(const std::string& version) {
+    if (version.empty() || version.size() > 16 ||
+        version.find_first_not_of("0123456789.") != std::string::npos) return;
+    std::lock_guard lock(g_app_version_mutex);
+    g_app_version = version;
+}
+
 ZeldaNotesPresence zelda_notes_current_live_presence() {
     ZeldaNotesClient* client = nullptr;
     {
@@ -1579,7 +1541,19 @@ void ZeldaNotesClient::publish_live_presence(ZeldaNotesPresence presence) {
 void ZeldaNotesClient::run_live_session(
     ZeldaNotesGame game,
     std::string web_service_token) {
+    // Reconnect rules: Nintendo's Zelda Notes page keeps one continuous
+    // connection open and reopens it when it closes normally. This client
+    // does the same, but only after a stream that delivered live data or
+    // after a dropped connection with no reply. Any error response from
+    // Nintendo (or a page that can't be used) ends live sync for this game
+    // session; it starts again only when the game changes or the user
+    // refreshes Rich Presence.
+    struct LiveSyncRefused : std::runtime_error {
+        using std::runtime_error::runtime_error;
+    };
+    constexpr int kMaxUnhealthyStreams = 3;
     int backoff_seconds = 2;
+    int unhealthy_streams = 0;
     WebMetadata metadata;
 
     log_zelda("run_live_session thread started for game=" + std::to_string(static_cast<int>(game)));
@@ -1590,7 +1564,7 @@ void ZeldaNotesClient::run_live_session(
         try {
             if (!ensure_session(web_service_token)) {
                 log_zelda("ensure_session failed inside run_live_session");
-                throw std::runtime_error("Zelda Notes session bootstrap failed");
+                throw LiveSyncRefused("Zelda Notes session bootstrap failed");
             }
             std::string session;
             std::string language;
@@ -1601,7 +1575,7 @@ void ZeldaNotesClient::run_live_session(
                 language = language_;
                 country = country_;
             }
-            if (session.empty()) throw std::runtime_error("Zelda Notes session unavailable");
+            if (session.empty()) throw LiveSyncRefused("Zelda Notes session unavailable");
 
             if (!metadata.protocol_ready()) {
                 log_zelda("run_live_session: discovering web metadata...");
@@ -1610,7 +1584,7 @@ void ZeldaNotesClient::run_live_session(
             }
             log_zelda("run_live_session: metadata protocol_ready=" + std::string(metadata.protocol_ready() ? "true" : "false"));
             if (!metadata.protocol_ready()) {
-                throw std::runtime_error("Zelda Notes map-sync actions unavailable");
+                throw LiveSyncRefused("Zelda Notes map-sync actions unavailable");
             }
 
             const auto sse_url =
@@ -1770,25 +1744,40 @@ void ZeldaNotesClient::run_live_session(
                 publish_live_presence({});
                 break;
             }
-            if (response.status != 0 && response.status / 100 != 2) {
-                protocol_failure = true;
+            if (protocol_failure || (response.status != 0 && response.status / 100 != 2)) {
+                log_zelda("Live map sync refused (HTTP " + std::to_string(response.status) +
+                    "); not reconnecting this game session");
+                publish_live_presence({});
+                break;
             }
-            if (protocol_failure) metadata = {};
-            backoff_seconds = 2;
+            if (healthy_stream) {
+                unhealthy_streams = 0;
+                backoff_seconds = 2;
+            } else if (++unhealthy_streams >= kMaxUnhealthyStreams) {
+                // Streams that open and close without live data would
+                // otherwise reconnect indefinitely.
+                log_zelda("Live map sync closed repeatedly without data; stopping");
+                publish_live_presence({});
+                break;
+            } else {
+                backoff_seconds = next_backoff(backoff_seconds);
+            }
+        } catch (const TransientHttpError&) {
+            // No reply at all: the only case that may be retried automatically.
+            if (live_stop_.load()) {
+                publish_live_presence({});
+                break;
+            }
+            log_zelda("Live map sync connection dropped; retrying later");
+            backoff_seconds = next_backoff(backoff_seconds);
         } catch (const std::exception&) {
-            if (!live_stop_.load()) {
-                log_zelda("Live map sync unavailable");
-            } else {
-                publish_live_presence({});
-            }
-            backoff_seconds = next_backoff(backoff_seconds);
+            log_zelda("Live map sync unavailable; not retrying this game session");
+            publish_live_presence({});
+            break;
         } catch (...) {
-            if (!live_stop_.load()) {
-                log_zelda("Live map sync unknown error");
-            } else {
-                publish_live_presence({});
-            }
-            backoff_seconds = next_backoff(backoff_seconds);
+            log_zelda("Live map sync unknown error; not retrying this game session");
+            publish_live_presence({});
+            break;
         }
 
         if (live_stop_.load()) break;

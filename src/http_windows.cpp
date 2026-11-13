@@ -421,6 +421,7 @@ HttpResponse HttpClient::request(
     const std::string& content_type,
     long timeout_seconds,
     std::size_t max_response_bytes) const {
+    count_request(url);
     const auto loopback_port = loopback_port_.load();
     const auto destination = parse_url(loopback_port != 0 && url.rfind("https://", 0) == 0
         ? "http://127.0.0.1:" + std::to_string(loopback_port) + "/" + url.substr(8)

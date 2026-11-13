@@ -307,6 +307,11 @@ bool CoralClient::restore_persistent_session(
         coral_access_token_ = token;
         cached_session_token_ = session_token;
         user_id_ = json.string("userId");
+        // Saved since 1.1: avoids asking Nintendo for the account profile
+        // again after a restart. Older entries just leave these empty.
+        na_id_ = json.string("naId");
+        na_language_ = json.string("naLanguage");
+        na_country_ = json.string("naCountry");
         coral_token_expiry_ = expires_at;
         return true;
     } catch (...) {
@@ -321,9 +326,21 @@ void CoralClient::persist_session(const std::string& session_token) {
         {"sessionHash", session_hash(session_token)},
         {"accessToken", coral_access_token_},
         {"userId", user_id_},
+        {"naId", na_id_},
+        {"naLanguage", na_language_},
+        {"naCountry", na_country_},
         {"expiresAt", epoch_seconds(coral_token_expiry_)},
     });
     SecureStore::put(kCoralCredentialAccount, json.dump());
+}
+
+std::pair<std::string, std::string> CoralClient::account_locale() {
+    std::lock_guard lock(session_mutex_);
+    return {na_language_, na_country_};
+}
+
+std::string CoralClient::app_version() {
+    return nxapi_.nso_version();
 }
 
 std::string CoralClient::app_user_agent() {
@@ -338,6 +355,8 @@ void CoralClient::clear_cached_session() {
         cached_session_token_.clear();
         user_id_.clear();
         na_id_.clear();
+        na_language_.clear();
+        na_country_.clear();
         coral_token_expiry_ = {};
         web_service_tokens_.clear();
     }
@@ -460,6 +479,8 @@ std::string CoralClient::ensure_session(const std::string& session_token) {
         coral_access_token_ = access_token;
         user_id_ = std::move(user_id);
         na_id_ = profile.id;
+        na_language_ = profile.language;
+        na_country_ = profile.country;
         cached_session_token_ = session_token;
         coral_token_expiry_ = Clock::now() + std::chrono::seconds(
             std::max<std::int64_t>(1, expires_in));
@@ -621,6 +642,10 @@ std::string CoralClient::get_web_service_token(
             na_id = profile.id;
             std::lock_guard lock(session_mutex_);
             na_id_ = na_id;
+            na_language_ = profile.language;
+            na_country_ = profile.country;
+            // Save them so the next restart doesn't need this lookup.
+            persist_session(session_token);
         }
 
         std::lock_guard request_lock(request_mutex_);

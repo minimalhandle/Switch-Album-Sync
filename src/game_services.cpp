@@ -16,10 +16,11 @@ namespace {
 
 constexpr char kNookLinkBaseUrl[] = "https://web.sd.lp1.acbaa.srv.nintendo.net";
 constexpr char kSplatNet2BaseUrl[] = "https://app.splatoon2.nintendo.net";
+// The same Android WebView User-Agent nxapi uses for NookLink and SplatNet 2
+// (NOOKLINK_/SPLATNET2_WEBSERVICE_USERAGENT), consistent with the Android
+// platform headers these requests send.
 constexpr char kWebServiceUserAgent[] =
     "Mozilla/5.0 (Linux; Android 8.0.0) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/58.0.3029.125 Mobile Safari/537.36";
-constexpr char kNxapiWebServiceUserAgent[] =
-    "Mozilla/5.0 (iPhone; CPU iPhone OS 15_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.3 Mobile/15E148 Safari/604.1";
 constexpr char kBlancoVersion[] = "2.1.1";
 constexpr auto kSessionTtl = std::chrono::minutes(90);
 
@@ -141,12 +142,10 @@ std::vector<std::string> nooklink_api_headers(
     const std::string& cookie_header,
     const std::string& language,
     const std::string& country) {
-    // Match the currently working nso-worker-backend request shape for NookLink
-    // API calls. In particular, preserve the WebService browser fingerprint and
-    // platform/origin context on POST /auth_token rather than using the older
-    // minimal direct-client header set.
+    // NookLink API calls carry the WebView's platform/origin context. The
+    // User-Agent matches the Android app these headers describe.
     return {
-        std::string("User-Agent: ") + kNxapiWebServiceUserAgent,
+        std::string("User-Agent: ") + kWebServiceUserAgent,
         "Cookie: " + cookie_header,
         "Upgrade-Insecure-Requests: 1",
         "dnt: 1",

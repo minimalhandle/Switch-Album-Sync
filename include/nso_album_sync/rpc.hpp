@@ -16,16 +16,34 @@ enum class RpcGameService {
 
 // Rich Presence polls Nintendo for your status. Keep a steady pace while a game
 // is running, and slow down once a few checks in a row find you offline (or
-// fail), so an idle PC makes far fewer requests. Explicit refreshes still run
-// immediately.
+// fail), so an idle PC makes far fewer requests: every minute while playing,
+// every 5 minutes once you're offline, every 15 minutes after about an hour
+// offline. Explicit refreshes still run immediately.
 inline constexpr auto kPresencePlayingInterval = std::chrono::seconds(60);
 inline constexpr auto kPresenceOfflineInterval = std::chrono::seconds(300);
+inline constexpr auto kPresenceLongOfflineInterval = std::chrono::seconds(900);
 inline constexpr int kPresenceOfflineChecksBeforeBackoff = 3;
+// 3 one-minute checks, then 12 five-minute checks: about an hour offline.
+inline constexpr int kPresenceOfflineChecksBeforeLongBackoff = kPresenceOfflineChecksBeforeBackoff + 12;
+// After this long offline, checks stop until someone uses the PC again, so a
+// PC left on (with Discord open) doesn't contact Nintendo all night.
+inline constexpr auto kPresenceIdlePauseAfter = std::chrono::hours(8);
+inline constexpr auto kPresenceUserActiveWithin = std::chrono::minutes(15);
 
 inline std::chrono::seconds presence_poll_interval(bool playing, int consecutive_offline_polls) {
-    return playing || consecutive_offline_polls < kPresenceOfflineChecksBeforeBackoff
-        ? kPresencePlayingInterval
-        : kPresenceOfflineInterval;
+    if (playing || consecutive_offline_polls < kPresenceOfflineChecksBeforeBackoff) {
+        return kPresencePlayingInterval;
+    }
+    return consecutive_offline_polls < kPresenceOfflineChecksBeforeLongBackoff
+        ? kPresenceOfflineInterval
+        : kPresenceLongOfflineInterval;
+}
+
+// True when polling should pause: offline for kPresenceIdlePauseAfter and
+// nobody has used this PC within kPresenceUserActiveWithin.
+inline bool presence_idle_paused(std::chrono::steady_clock::duration offline_for,
+                                 std::chrono::steady_clock::duration pc_idle_for) {
+    return offline_for >= kPresenceIdlePauseAfter && pc_idle_for >= kPresenceUserActiveWithin;
 }
 
 inline bool rpc_contains_any(const std::string& text, std::initializer_list<const char*> needles) {
@@ -78,7 +96,9 @@ inline bool rpc_service_enabled(RpcGameService service, const RpcSettings& setti
     return false;
 }
 
-// Failed probes retry at a bounded cadence instead of poisoning a play session.
+// One game-details probe per game session. A failed probe is not repeated
+// automatically (nxapi's terms forbid automatic retries after an error
+// response); Refresh presence, a settings change or the next game starts over.
 struct RpcEnrichmentCache {
     using Clock = std::chrono::steady_clock;
     std::string game_key;
@@ -105,7 +125,8 @@ struct RpcEnrichmentCache {
         profile_image = presence.profile_image_uri;
         state = presence.custom_state;
         image = presence.custom_image_uri;
-        retry_at = now + std::chrono::minutes(5);
+        (void)now;
+        retry_at = Clock::time_point::max();
     }
     void apply(NintendoPresence& presence) const {
         presence.custom_details = details;

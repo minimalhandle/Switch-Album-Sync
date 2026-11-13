@@ -588,42 +588,60 @@ std::vector<LocalCapture> scan_capture_library(
     if (error) return {};
     const auto legacy = is_default_album_folder(album) ? album / "Album" : std::filesystem::path{};
     std::vector<LocalCapture> captures;
-    const auto file_now = std::filesystem::file_time_type::clock::now();
-    const auto system_now = std::chrono::system_clock::now();
-    auto iterator = std::filesystem::recursive_directory_iterator(
-        album, std::filesystem::directory_options::skip_permission_denied, error);
-    const auto end = std::filesystem::recursive_directory_iterator();
-    for (; iterator != end; iterator.increment(error)) {
+    if (!std::filesystem::is_directory(album, error) || error) return {};
+
+    // One FindFirstFileEx pass returns each file's size, modified and created
+    // times together, so large albums need no extra per-file system calls.
+    constexpr std::uint64_t kUnixEpochTicks = 116444736000000000ULL;
+    const auto ticks = [](const FILETIME& time) {
+        return (static_cast<std::uint64_t>(time.dwHighDateTime) << 32) | time.dwLowDateTime;
+    };
+    std::vector<std::filesystem::path> pending{album};
+    while (!pending.empty()) {
         if (should_cancel(cancelled)) return {};
-        const auto& entry = *iterator;
-        if (entry.is_directory(error) && !error && is_workspace(entry.path())) {
-            iterator.disable_recursion_pending();
-            continue;
-        }
-        if (!std::filesystem::is_regular_file(entry.symlink_status(error)) || error) continue;
-        const auto extension = lower(path_to_utf8(entry.path().extension()));
-        const bool video = extension == ".mp4";
-        if (!video && extension != ".jpg" && extension != ".jpeg" && extension != ".png") continue;
-        const auto bytes = entry.file_size(error);
-        if (!bytes || error) continue;
-        const auto modified = entry.last_write_time(error);
-        if (error) continue;
-        auto relative = entry.path().lexically_relative(album);
-        if (!legacy.empty() && relative.has_parent_path() && *relative.begin() == legacy.filename()) {
-            relative = entry.path().lexically_relative(legacy);
-        }
-        const auto folder = relative.has_parent_path() ? album / *relative.begin() : album;
-        const auto timestamp = std::chrono::floor<std::chrono::seconds>(
-            system_now + (modified - file_now)).time_since_epoch().count();
-        std::int64_t added_ms = 0;
-        WIN32_FILE_ATTRIBUTE_DATA attributes{};
-        if (GetFileAttributesExW(entry.path().c_str(), GetFileExInfoStandard, &attributes)) {
-            const auto& created = attributes.ftCreationTime;
-            const auto ticks = (static_cast<std::uint64_t>(created.dwHighDateTime) << 32) | created.dwLowDateTime;
-            constexpr std::uint64_t unix_epoch = 116444736000000000ULL;
-            if (ticks >= unix_epoch) added_ms = static_cast<std::int64_t>((ticks - unix_epoch) / 10000);
-        }
-        captures.push_back({entry.path(), folder, timestamp, bytes, video, added_ms});
+        const auto directory = std::move(pending.back());
+        pending.pop_back();
+        WIN32_FIND_DATAW data{};
+        const HANDLE find = FindFirstFileExW((directory / L"*").c_str(), FindExInfoBasic, &data,
+            FindExSearchNameMatch, nullptr, FIND_FIRST_EX_LARGE_FETCH);
+        if (find == INVALID_HANDLE_VALUE) continue;  // Unreadable folders are skipped.
+        do {
+            if (should_cancel(cancelled)) {
+                FindClose(find);
+                return {};
+            }
+            const std::wstring_view name(data.cFileName);
+            if (name == L"." || name == L"..") continue;
+            // Symbolic links and junctions are skipped, as before. Other reparse
+            // points (such as OneDrive files) are ordinary captures.
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                (data.dwReserved0 == IO_REPARSE_TAG_SYMLINK || data.dwReserved0 == IO_REPARSE_TAG_MOUNT_POINT)) {
+                continue;
+            }
+            auto path = directory / data.cFileName;
+            if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                if (!is_workspace(path)) pending.push_back(std::move(path));
+                continue;
+            }
+            const auto extension = lower(path_to_utf8(path.extension()));
+            const bool video = extension == ".mp4";
+            if (!video && extension != ".jpg" && extension != ".jpeg" && extension != ".png") continue;
+            const auto bytes = (static_cast<std::uintmax_t>(data.nFileSizeHigh) << 32) | data.nFileSizeLow;
+            if (!bytes) continue;
+            const auto written = ticks(data.ftLastWriteTime);
+            const auto created = ticks(data.ftCreationTime);
+            const auto timestamp = written >= kUnixEpochTicks
+                ? static_cast<std::int64_t>((written - kUnixEpochTicks) / 10000000ULL) : 0;
+            const auto added_ms = created >= kUnixEpochTicks
+                ? static_cast<std::int64_t>((created - kUnixEpochTicks) / 10000ULL) : 0;
+            auto relative = path.lexically_relative(album);
+            if (!legacy.empty() && relative.has_parent_path() && *relative.begin() == legacy.filename()) {
+                relative = path.lexically_relative(legacy);
+            }
+            const auto folder = relative.has_parent_path() ? album / *relative.begin() : album;
+            captures.push_back({std::move(path), folder, timestamp, bytes, video, added_ms});
+        } while (FindNextFileW(find, &data));
+        FindClose(find);
     }
     std::sort(captures.begin(), captures.end(), [](const LocalCapture& left, const LocalCapture& right) {
         if (left.modified != right.modified) return left.modified > right.modified;
@@ -736,6 +754,7 @@ SyncResult SyncEngine::sync(
     } catch (const std::exception& error) {
         throw_if_cancelled(cancelled);
         result.error_detail = error.what();
+        result.transient = dynamic_cast<const TransientHttpError*>(&error) != nullptr;
         return fatal(SyncFailure::service);
     }
     throw_if_cancelled(cancelled);
@@ -749,22 +768,37 @@ SyncResult SyncEngine::sync(
     result.total_found = static_cast<int>(selected.size());
     result.unavailable = static_cast<int>(remaining.size());
 
-    ExistingAlbumIndex existing;
+    std::filesystem::path root;
     std::filesystem::path album;
     try {
-        const auto root = path_from_utf8(config.destination_folder.empty()
+        root = path_from_utf8(config.destination_folder.empty()
             ? default_album_folder()
             : config.destination_folder);
         album = album_directory(root);
         std::filesystem::create_directories(root);
-        existing = index_existing_album(root, cancelled);
     } catch (const std::runtime_error&) {
         throw_if_cancelled(cancelled);
         return fatal(SyncFailure::storage);
     }
-    const auto title_folders = learn_title_folders(media, existing);
 
     SyncReceipts receipts(config_.directory() / "synced-media.json", album);
+
+    // Most automatic syncs find nothing new. Only walk the album folder (which
+    // can hold thousands of files) when something might be downloaded.
+    const bool all_synced = retry_ids.empty() &&
+        std::all_of(selected.begin(), selected.end(), [&](const MediaItem* item) {
+            return receipts.contains(item->id);
+        });
+    ExistingAlbumIndex existing;
+    if (!all_synced) {
+        try {
+            existing = index_existing_album(root, cancelled);
+        } catch (const std::runtime_error&) {
+            throw_if_cancelled(cancelled);
+            return fatal(SyncFailure::storage);
+        }
+    }
+    const auto title_folders = learn_title_folders(media, existing);
     // Save whatever was recorded even if the sync is cancelled part way.
     struct SaveReceipts {
         SyncReceipts& receipts;
@@ -867,6 +901,11 @@ SyncResult SyncEngine::sync(
             ++result.failed;
             if (result.failure == SyncFailure::none || failure == SyncFailure::storage) {
                 result.failure = failure;
+            }
+            if (item.expires_at > 0) {
+                const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                if (unix_seconds(item.expires_at) - now <= kExpiryWarningSeconds) ++result.expiring_soon;
             }
             auto retry_id = media_retry_id(item);
             const bool transient = dynamic_cast<const TransientHttpError*>(&error) != nullptr;

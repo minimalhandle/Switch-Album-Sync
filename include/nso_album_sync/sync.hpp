@@ -16,6 +16,7 @@
 namespace nso {
 
 enum class SyncStage { checking, downloading };
+inline constexpr std::int64_t kExpiryWarningSeconds = 3 * 24 * 60 * 60;
 enum class SyncFailure { none, sign_in, service, download, storage };
 
 struct SyncProgress {
@@ -39,8 +40,14 @@ struct SyncResult {
     int failed = 0;
     int unavailable = 0;
     int review = 0;
+    // Failed captures that Nintendo's album removes within kExpiryWarning,
+    // from the expiry dates the album listing already includes.
+    int expiring_soon = 0;
     SyncFailure failure = SyncFailure::none;
     bool fatal = false;
+    // The failure was a dropped connection with no reply (TransientHttpError).
+    // Only these may be retried automatically; an error response never is.
+    bool transient = false;
     // Technical reason for a failure (step and HTTP status). Never contains tokens.
     std::string error_detail;
     std::vector<std::string> failed_ids;

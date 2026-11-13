@@ -257,7 +257,9 @@ struct WindowsLibrary::Impl {
         for (const auto id : {Search, Tags}) {
             make(id, L"EDIT", L"", WS_TABSTOP | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE);
         }
-        SendMessageW(get(Search), EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search captures, games, or tags"));
+        // TRUE keeps the hint visible while the box has focus, which it has
+        // when the library opens.
+        SendMessageW(get(Search), EM_SETCUEBANNER, TRUE, reinterpret_cast<LPARAM>(L"Search captures, games, or tags"));
         SendMessageW(get(Tags), EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Tags, separated by commas"));
         SendMessageW(get(Tags), EM_LIMITTEXT, 512, 0);
         button(NewCaptures, L"New since last visit", BS_AUTOCHECKBOX);
@@ -346,6 +348,7 @@ struct WindowsLibrary::Impl {
         const int top = library() ? 219 : duplicates() ? 109 : history() ? 174 : 148;
         const int list_height = duplicates() ? std::max(86, height / 4) : height - top - 78;
         place(Rows, 20, top, library() ? panel_x - 34 : width - 40, list_height);
+        fit_columns();
         const int preview_height = std::max(50, height - 356);
         const int review_top = top + list_height + 10;
         const int half = (width - 52) / 2;
@@ -411,12 +414,17 @@ struct WindowsLibrary::Impl {
         }
         choice(Game, index);
         SendMessageW(get(Runs), CB_RESETCONTENT, 0, 0);
-        if (state.sync_history) for (const auto& run : *state.sync_history) {
+        const bool has_runs = state.sync_history && !state.sync_history->empty();
+        if (has_runs) for (const auto& run : *state.sync_history) {
             option(Runs, wide(run.string("time")) + (run.boolean("automatic_retry") ? L"  ·  Automatic retry" : L"") +
                 L"  ·  " + std::to_wstring(run.integer("downloaded")) +
                 L" downloaded  ·  " + std::to_wstring(run.integer("skipped")) + L" skipped  ·  " +
                 std::to_wstring(run.integer("failed")) + L" failed");
+        } else {
+            // An empty dropdown looks broken; say why there's nothing to pick.
+            option(Runs, L"No sync runs yet");
         }
+        EnableWindow(get(Runs), has_runs);
         choice(Runs, 0);
     }
 
@@ -548,8 +556,24 @@ struct WindowsLibrary::Impl {
             column.mask = LVCF_TEXT | LVCF_WIDTH;
             column.pszText = const_cast<wchar_t*>(text);
             column.cx = px(width);
+            if (!index) first_column_width = width;
             ListView_InsertColumn(get(Rows), index++, &column);
         }
+        fit_columns();
+    }
+    // The first column (capture or game name) takes the width the others
+    // leave, so names aren't cut off next to an empty, untitled header area.
+    int first_column_width = 0;
+    void fit_columns() {
+        const HWND list = get(Rows);
+        const HWND header = list ? ListView_GetHeader(list) : nullptr;
+        const int count = header ? Header_GetItemCount(header) : 0;
+        if (count <= 0) return;
+        RECT client{};
+        GetClientRect(list, &client);
+        int others = 0;
+        for (int i = 1; i < count; ++i) others += ListView_GetColumnWidth(list, i);
+        ListView_SetColumnWidth(list, 0, std::max<int>(px(first_column_width), client.right - others));
     }
     void add_row(std::initializer_list<std::wstring> fields) {
         const int index = ListView_GetItemCount(get(Rows));

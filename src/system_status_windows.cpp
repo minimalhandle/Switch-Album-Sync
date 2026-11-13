@@ -37,4 +37,11 @@ int local_hour_now() {
     return localtime_s(&local, &now) == 0 ? local.tm_hour : 12;
 }
 
+std::chrono::milliseconds user_idle_time() {
+    LASTINPUTINFO input{sizeof(input)};
+    if (!GetLastInputInfo(&input)) return std::chrono::milliseconds::zero();
+    // Both are GetTickCount values; unsigned subtraction handles wraparound.
+    return std::chrono::milliseconds(static_cast<DWORD>(GetTickCount() - input.dwTime));
+}
+
 }  // namespace nso

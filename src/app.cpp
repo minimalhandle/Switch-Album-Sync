@@ -64,8 +64,9 @@ constexpr char kDiscordDisclosureBody[] =
     "• details for games you've enabled: Splatoon rank and weapon, Animal Crossing "
     "island and resident, Zelda Notes location\n\n"
     "Discord shows this to people who can see your activity and loads the images "
-    "from Nintendo, splatoon3.ink and Zelda Wiki. Game details come from Nintendo's game "
-    "services, reached through nxapi like other Nintendo Switch Online requests.";
+    "from Nintendo, splatoon3.ink and Zelda Wiki. Game details come straight from "
+    "Nintendo's game services. Only the sign-in for each game service goes through "
+    "nxapi, like other Nintendo Switch Online requests.";
 constexpr char kDiscordTurnOnQuestion[] = "\n\nTurn on Rich Presence?";
 constexpr char kDiscordKeepOnQuestion[] = "\n\nRich Presence is already on. Keep it on?";
 
@@ -257,6 +258,9 @@ void App::update_menu() {
         menu.diagnostics += config.auto_sync ? "Auto-sync: on\n" : "Auto-sync: off\n";
         menu.diagnostics += discord_available ? "Discord support: yes\n" : "Discord support: no\n";
         menu.diagnostics += "Latest event: " + diagnostic_code_ + "\n";
+        const auto requests = requests_today();
+        menu.diagnostics += "Requests today: " + std::to_string(requests.nintendo) + " to Nintendo, " +
+            std::to_string(requests.nxapi) + " to nxapi\n";
         if (!last_error_.empty()) menu.diagnostics += "Latest error: " + last_error_ + "\n";
         // Diagnostics keep every count, including captures already present.
         menu.diagnostics += "Latest sync: " + std::to_string(sync_progress_.new_downloads) + " new, " +
@@ -398,6 +402,7 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         result.failure = SyncFailure::service;
         result.fatal = true;
         result.error_detail = error.what();
+        result.transient = dynamic_cast<const TransientHttpError*>(&error) != nullptr;
     }
     if (!result.error_detail.empty()) {
         std::lock_guard state_lock(state_mutex_);
@@ -455,7 +460,10 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
                 for (const auto& item : result.items) {
                     if (item.transient && !item.retry_id.empty()) schedule(item.retry_id);
                 }
-                if (request == SyncRequest::automatic_retry && result.failure == SyncFailure::service) {
+                // Reschedule a retry only when the album request itself never got
+                // a reply. After an error response, wait for the user instead.
+                if (request == SyncRequest::automatic_retry && result.failure == SyncFailure::service &&
+                    result.transient) {
                     for (const auto& id : retry_ids) schedule(id);
                 }
                 if (retry_ids.empty()) pending_retries_.swap(next);
@@ -513,6 +521,12 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
             if (result.failure == SyncFailure::download) {
                 status_ += failed_ids_.empty() ? " Try syncing again." : " Retry the failed items.";
             }
+            if (result.expiring_soon > 0) {
+                // Nintendo's album only keeps captures for a limited time.
+                status_ += " " + std::to_string(result.expiring_soon) +
+                    (result.expiring_soon == 1 ? " of them leaves" : " of them leave") +
+                    " Nintendo's album within 3 days.";
+            }
             notification = status_;
         } else {
             diagnostic_code_ = "captures_no_longer_available";
@@ -529,7 +543,8 @@ void App::sync_now(SyncRequest request, const std::string& capture, const std::s
         } else
         ui_.notify("Switch Album Sync", notification);
     }
-    queue_recent_refresh();
+    // Rescan the library only when this sync added files to it.
+    if (result.new_downloads > 0 || result.review > 0) queue_recent_refresh();
 }
 
 bool App::queue_sync(SyncRequest request, const std::string& capture, const std::string& scope,
@@ -1011,6 +1026,8 @@ void App::presence_loop() {
     // Consecutive polls that found you offline (or failed). After a few, the
     // poll interval stretches so an idle PC sends far fewer Nintendo requests.
     int offline_polls = 0;
+    // When checks started finding you offline (or failing); unset while playing.
+    std::chrono::steady_clock::time_point offline_since{};
     while (!stopping_) {
         AppConfig config;
         std::uint64_t generation;
@@ -1036,6 +1053,7 @@ void App::presence_loop() {
         // check again locally rather than asking Nintendo for presence.
         if (!discord_.client_running()) {
             offline_polls = 0;
+            offline_since = {};
             reset_enrichment();
             discord_.clear();
             release_deferred_sync(config.session_token);
@@ -1052,10 +1070,21 @@ void App::presence_loop() {
         // call remains set and causes another immediate pass afterwards.
         if (presence_refresh_requested_.exchange(false, std::memory_order_acq_rel)) {
             offline_polls = 0;
+            offline_since = {};
+        }
+
+        // Offline for hours and nobody at the PC: stop asking Nintendo until
+        // someone uses the PC again (checked locally once a minute).
+        if (offline_since != std::chrono::steady_clock::time_point{} &&
+            presence_idle_paused(std::chrono::steady_clock::now() - offline_since, user_idle_time())) {
+            std::unique_lock wait_lock(presence_sleep_mutex_);
+            presence_cv_.wait_for(wait_lock, std::chrono::minutes(1), presence_paused);
+            continue;
         }
 
         const auto session_token = config.session_token;
         bool playing = false;
+        bool failed = false;
         try {
             auto presence = coral_.self_presence(session_token);
             config = config_.snapshot();
@@ -1126,6 +1155,7 @@ void App::presence_loop() {
             invalidate_session(generation, true);
             continue;
         } catch (const std::exception& error) {
+            failed = true;
             {
                 std::lock_guard state_lock(state_mutex_);
                 last_error_ = std::string("Rich Presence: ") + std::string(error.what()).substr(0, 200);
@@ -1140,8 +1170,18 @@ void App::presence_loop() {
         // Re-randomize every cycle so timer-driven Nintendo requests do not
         // land on an exact cadence. Explicit user-triggered refreshes still
         // bypass this wait and run immediately.
-        offline_polls = playing ? 0 :
-            std::min(offline_polls + 1, kPresenceOfflineChecksBeforeBackoff);
+        if (playing) {
+            offline_polls = 0;
+            offline_since = {};
+        } else {
+            if (offline_since == std::chrono::steady_clock::time_point{}) {
+                offline_since = std::chrono::steady_clock::now();
+            }
+            offline_polls = std::min(offline_polls + 1, kPresenceOfflineChecksBeforeLongBackoff);
+            // After a failed check, go straight to the slower pace instead of
+            // asking again a minute later.
+            if (failed) offline_polls = std::max(offline_polls, kPresenceOfflineChecksBeforeBackoff);
+        }
         const auto poll_interval = jittered_interval(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 presence_poll_interval(playing, offline_polls)));
@@ -1394,7 +1434,9 @@ int App::run() {
         initial_sync_deferred_.store(false, std::memory_order_release);
         {
             std::lock_guard state_lock(state_mutex_);
-            status_ = config.auto_sync ? "Auto-sync enabled" : "Auto-sync disabled";
+            const bool signed_in = !config.session_token.empty();
+            status_ = !config.auto_sync ? "Auto-sync disabled" :
+                signed_in ? "Auto-sync enabled" : "Auto-sync is on. It starts after you sign in.";
             next_sync_ = {};
         }
         update_menu();
@@ -1405,9 +1447,9 @@ int App::run() {
         if (config.notifications) {
             ui_.notify(
                 "Switch Album Sync",
-                config.auto_sync
-                    ? "Auto-sync enabled. Interval: " + std::to_string(config.sync_interval_minutes) + " min."
-                    : "Auto-sync disabled.");
+                !config.auto_sync ? "Auto-sync disabled." :
+                config.session_token.empty() ? "Auto-sync is on. It starts after you sign in." :
+                    "Auto-sync enabled. Interval: " + std::to_string(config.sync_interval_minutes) + " min.");
         }
     };
 

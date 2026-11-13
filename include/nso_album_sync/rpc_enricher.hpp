@@ -2,6 +2,7 @@
 
 #include "nso_album_sync/rpc.hpp"
 
+#include <cstdint>
 #include <functional>
 #include <string>
 
@@ -42,6 +43,9 @@ private:
     SplatNetClient& splatnet_;
     ZeldaNotesClient& zeldanotes_;
     GameServicesClient& game_services_;
+    // The Zelda Notes service ID that last worked, tried first next time so a
+    // probe normally needs one web-service token, not two.
+    std::uint64_t zelda_service_id_ = 0;
 
     void use_account_locale(const std::string& session_token);
     void add_splatoon3(const std::string& session_token, NintendoPresence& presence);

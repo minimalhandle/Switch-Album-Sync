@@ -189,6 +189,9 @@ void zelda_notes_note_discord_presence(
 // Discord queries this just before rendering. It returns active=true only for a
 // synchronized, fresh location that could be resolved to trustworthy text.
 ZeldaNotesPresence zelda_notes_current_live_presence();
+// The Nintendo Switch Online app version Zelda Notes requests identify as
+// (digits and dots only; anything else is ignored).
+void zelda_notes_set_app_version(const std::string& version);
 
 // The live Zelda worker asks Discord to re-render only when the meaningful
 // details/state strings change (or when live location becomes unavailable).

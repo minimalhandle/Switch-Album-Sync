@@ -59,13 +59,20 @@ bool RpcEnricher::enrich(
 
 void RpcEnricher::use_account_locale(const std::string& session_token) {
     // Game WebView bootstraps use the Nintendo Account locale, as in nxapi.
-    // This profile data is only needed for the one enrichment probe.
+    // The Coral sign-in already recorded it; Nintendo's app doesn't fetch the
+    // account profile again to open a game service, so neither does this.
     try {
-        const auto tokens = auth_.exchange_session_token(session_token);
-        const auto profile = auth_.fetch_profile(tokens.access_token);
-        splatnet_.set_locale(profile.language, profile.country);
-        zeldanotes_.set_locale(profile.language, profile.country);
-        game_services_.set_locale(profile.language, profile.country);
+        auto [language, country] = coral_.account_locale();
+        if (language.empty() || country.empty()) {
+            // Only for a sign-in saved by an older version without the locale.
+            const auto tokens = auth_.exchange_session_token(session_token);
+            const auto profile = auth_.fetch_profile(tokens.access_token);
+            language = profile.language;
+            country = profile.country;
+        }
+        splatnet_.set_locale(language, country);
+        zeldanotes_.set_locale(language, country);
+        game_services_.set_locale(language, country);
     } catch (const NintendoSessionExpired&) {
         throw;
     } catch (...) {
@@ -85,10 +92,23 @@ void RpcEnricher::add_splatoon3(const std::string& session_token, NintendoPresen
 }
 
 bool RpcEnricher::prepare_zelda_notes(const std::string& session_token) {
-    for (const auto service_id : {kZeldaNotesGameServiceId, kZeldaNotesGameServiceIdAlt}) {
+    // Already cached from the presence check, so this sends nothing.
+    try {
+        zelda_notes_set_app_version(coral_.app_version());
+    } catch (const std::exception&) {
+    }
+    const bool alt_first = zelda_service_id_ == kZeldaNotesGameServiceIdAlt;
+    const std::uint64_t order[] = {
+        alt_first ? kZeldaNotesGameServiceIdAlt : kZeldaNotesGameServiceId,
+        alt_first ? kZeldaNotesGameServiceId : kZeldaNotesGameServiceIdAlt,
+    };
+    for (const auto service_id : order) {
         try {
             const auto token = coral_.get_web_service_token(session_token, service_id);
-            if (zeldanotes_.prepare_session(token)) return true;
+            if (zeldanotes_.prepare_session(token)) {
+                zelda_service_id_ = service_id;
+                return true;
+            }
         } catch (const NintendoSessionExpired&) {
             throw;
         } catch (const std::exception&) {

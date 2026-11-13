@@ -380,7 +380,9 @@ struct WindowsDashboard::Impl {
         label(DiscordHint, L"Discord desktop must be running. Visibility follows Discord Activity Sharing.");
         label(DiscordProfileHeading, L"Profile and play time");
         label(DiscordGamesHeading, L"Game details");
-        label(DiscordZeldaGames, L"Zelda Notes live location in Switch Album Sync\nOcarina of Time (Switch 2)\nBreath of the Wild and Tears of the Kingdom (Switch 2 Editions)");
+        label(DiscordZeldaGames, L"Zelda Notes live location works with:\n"
+            L"•  Ocarina of Time on Nintendo Switch 2\n"
+            L"•  Breath of the Wild and Tears of the Kingdom, Nintendo Switch 2 Editions");
         label(DiscordUnavailable, L"Unavailable in this build.");
         label(Feedback, L"", SS_RIGHT);
         set_fonts();

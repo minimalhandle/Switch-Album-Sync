@@ -2,6 +2,7 @@
 
 #include "nso_album_sync/config.hpp"
 
+#include <chrono>
 #include <string>
 
 namespace nso {
@@ -32,5 +33,7 @@ inline std::string auto_sync_pause_reason(
 bool battery_saver_on();
 bool metered_connection();
 int local_hour_now();
+// How long since the last keyboard or mouse input on this PC.
+std::chrono::milliseconds user_idle_time();
 
 }  // namespace nso

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <ctime>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -19,6 +20,70 @@ class TransientHttpError : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+
+// Requests sent today (local time), by destination, for Copy diagnostics, so
+// users can see how lightly the app uses Nintendo's and nxapi's services.
+// Counted in memory only; nothing about the requests themselves is kept.
+struct RequestCounts {
+    int nintendo = 0;
+    int nxapi = 0;
+};
+
+namespace detail {
+inline std::mutex& request_count_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+struct RequestCountState {
+    int day = -1;  // tm_yday + 1000 * tm_year
+    RequestCounts counts;
+};
+inline RequestCountState& request_count_state() {
+    static RequestCountState state;
+    return state;
+}
+inline int local_day_key() {
+    const auto now = std::time(nullptr);
+    std::tm local{};
+    if (localtime_s(&local, &now) != 0) return 0;
+    return local.tm_yday + 1000 * local.tm_year;
+}
+inline bool host_ends_with(const std::string& host, const char* suffix) {
+    const std::string tail(suffix);
+    return host == tail.substr(1) ||
+        (host.size() > tail.size() && host.compare(host.size() - tail.size(), tail.size(), tail) == 0);
+}
+}  // namespace detail
+
+inline void count_request(const std::string& url) {
+    const auto scheme = url.find("://");
+    if (scheme == std::string::npos) return;
+    const auto start = scheme + 3;
+    const auto end = url.find_first_of(":/?#", start);
+    std::string host = url.substr(start, end == std::string::npos ? std::string::npos : end - start);
+    for (auto& character : host) {
+        if (character >= 'A' && character <= 'Z') character = static_cast<char>(character - 'A' + 'a');
+    }
+    const bool nintendo = detail::host_ends_with(host, ".nintendo.net") ||
+        detail::host_ends_with(host, ".nintendo.com");
+    const bool nxapi = detail::host_ends_with(host, ".fancy.org.uk");
+    if (!nintendo && !nxapi) return;
+    std::lock_guard lock(detail::request_count_mutex());
+    auto& state = detail::request_count_state();
+    const auto day = detail::local_day_key();
+    if (state.day != day) {
+        state.day = day;
+        state.counts = {};
+    }
+    ++(nintendo ? state.counts.nintendo : state.counts.nxapi);
+}
+
+inline RequestCounts requests_today() {
+    std::lock_guard lock(detail::request_count_mutex());
+    auto& state = detail::request_count_state();
+    if (state.day != detail::local_day_key()) return {};
+    return state.counts;
+}
 
 struct HttpResponse {
     long status = 0;

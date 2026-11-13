@@ -77,6 +77,13 @@ public:
     // The User-Agent the app's Coral requests use, for other requests to
     // Nintendo services (imitating the official app, as the nxapi terms advise).
     std::string app_user_agent();
+    // The Nintendo Switch Online app version these requests identify as
+    // (nxapi's supported version, cached).
+    std::string app_version();
+    // The Nintendo Account language and country recorded at the last Coral
+    // sign-in (empty if unknown). Game web services use them, as nxapi does,
+    // without asking Nintendo for the account profile again.
+    std::pair<std::string, std::string> account_locale();
 
 private:
     using Clock = std::chrono::system_clock;
@@ -93,6 +100,8 @@ private:
     std::string cached_session_token_;
     std::string user_id_;
     std::string na_id_;
+    std::string na_language_;
+    std::string na_country_;
     Clock::time_point coral_token_expiry_{};
 
     struct CachedWebServiceToken {

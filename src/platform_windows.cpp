@@ -260,16 +260,16 @@ void tray_menu(PlatformUi::Impl* ui) {
     add(0, L"Last sync: " + wide(s.last_sync), MF_GRAYED);
     if (s.sync_busy) add(0, wide(s.status), MF_GRAYED);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    add(CmdSync, L"Sync Now", s.signed_in && !s.sync_busy ? MF_STRING : MF_GRAYED);
+    add(CmdSync, L"Sync now", s.signed_in && !s.sync_busy ? MF_STRING : MF_GRAYED);
     add(CmdImportCaptures, L"Import USB / SD…", s.sync_busy ? MF_GRAYED : MF_STRING);
     if (s.retry_available) {
-        add(CmdRetry, L"Retry Failed Captures", s.signed_in && !s.sync_busy ? MF_STRING : MF_GRAYED);
+        add(CmdRetry, L"Retry failed captures", s.signed_in && !s.sync_busy ? MF_STRING : MF_GRAYED);
     }
     add(
         CmdAuto,
         auto_label(s.sync_interval_minutes),
         MF_STRING | (s.auto_sync ? MF_CHECKED : 0));
-    add(CmdCopy, L"Copy Last Capture", s.recent_captures.empty() ? MF_GRAYED : MF_STRING);
+    add(CmdCopy, L"Copy latest capture", s.recent_captures.empty() ? MF_GRAYED : MF_STRING);
     const auto recent_count = std::min(kRecentLimit, s.recent_captures.size());
     std::vector<HBITMAP> menu_thumbnails;
     if (recent_count) {
@@ -332,25 +332,25 @@ void tray_menu(PlatformUi::Impl* ui) {
         rpc_check(CmdRpcSplatoon2, L"Splatoon 2 details", s.rpc.splatoon2);
         AppendMenuW(rpc, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(rpc, MF_STRING | (s.discord && s.signed_in ? 0 : MF_GRAYED),
-            CmdRpcRefresh, L"Refresh Now");
+            CmdRpcRefresh, L"Refresh presence");
         AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(rpc), L"Discord Rich Presence");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    add(CmdFolder, L"Choose Album Folder…");
-    add(CmdOpen, L"Open Album Folder");
+    add(CmdFolder, L"Change album folder…");
+    add(CmdOpen, L"Open folder");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(
         CmdStartup,
-        L"Start on Boot",
+        L"Start with Windows",
         MF_STRING | (s.start_on_boot ? MF_CHECKED : 0));
-    add(CmdProxy, L"HTTP Proxy…");
+    add(CmdProxy, L"HTTP proxy…");
     if (s.sign_in_pending) {
-        if (s.manual_sign_in) add(CmdPasteSignIn, L"Paste Sign-In Link…");
-        add(CmdCancelSignIn, L"Cancel Sign-In");
+        if (s.manual_sign_in) add(CmdPasteSignIn, L"Paste sign-in link…");
+        add(CmdCancelSignIn, L"Cancel sign-in");
     } else {
-        add(CmdAccount, s.signed_in ? L"Sign Out" : L"Sign In to Nintendo Account…");
+        add(CmdAccount, s.signed_in ? L"Sign out" : L"Sign in…");
     }
-    if (s.legacy_credential) add(CmdClearCredential, L"Clear Saved Credential…");
+    if (s.legacy_credential) add(CmdClearCredential, L"Clear saved credential…");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     add(CmdExit, L"Exit");
 

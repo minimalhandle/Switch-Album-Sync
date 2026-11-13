@@ -494,6 +494,35 @@ void rich_presence() {
     require(nso::presence_poll_interval(true, 3) == seconds(60), "Playing polls every minute");
     require(nso::presence_poll_interval(false, 2) == seconds(60), "First offline checks stay at a minute");
     require(nso::presence_poll_interval(false, 3) == seconds(300), "Offline polling backs off to 5 minutes");
+    require(nso::presence_poll_interval(false, nso::kPresenceOfflineChecksBeforeLongBackoff) == seconds(900),
+        "After about an hour offline, polling backs off to 15 minutes");
+    require(nso::presence_poll_interval(true, nso::kPresenceOfflineChecksBeforeLongBackoff) == seconds(60),
+        "Playing again goes straight back to every minute");
+
+    using std::chrono::hours;
+    using std::chrono::minutes;
+    require(!nso::presence_idle_paused(hours(7), hours(7)), "Polling continues during the first 8 hours offline");
+    require(nso::presence_idle_paused(hours(8), minutes(15)), "Polling pauses after 8 hours offline with nobody at the PC");
+    require(!nso::presence_idle_paused(hours(9), minutes(2)), "Using the PC resumes polling");
+
+    nso::RpcEnrichmentCache enrichment;
+    enrichment.begin("game", 1, 1);
+    const auto start = nso::RpcEnrichmentCache::Clock::now();
+    require(enrichment.should_probe(start), "A new game session probes once");
+    enrichment.complete(nso::NintendoPresence{}, false, start);
+    require(!enrichment.should_probe(start + hours(24)), "A failed probe is never repeated automatically");
+    require(enrichment.begin("game", 1, 2) && enrichment.should_probe(start),
+        "Refresh presence (a new settings revision) probes again");
+
+    const auto before = nso::requests_today();
+    nso::count_request("https://api-lp1.znc.srv.nintendo.net/v4/Media/List");
+    nso::count_request("https://accounts.nintendo.com/connect/1.0.0/api/token");
+    nso::count_request("https://nxapi-znca-api.fancy.org.uk/api/znca/f");
+    nso::count_request("https://splatoon3.ink/assets/x.png");
+    nso::count_request("https://evilnintendo.net/");
+    const auto after = nso::requests_today();
+    require(after.nintendo == before.nintendo + 2, "Nintendo requests are counted by host");
+    require(after.nxapi == before.nxapi + 1, "nxapi requests are counted; other hosts are not");
 }
 
 void discord_detection() {
