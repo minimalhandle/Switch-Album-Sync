@@ -91,6 +91,26 @@ std::string form_value(const std::string& body, const std::string& name) {
     return body.substr(start + name.size() + 1, end == std::string::npos ? std::string::npos : end - start - name.size() - 1);
 }
 
+constexpr char kCoralLoginUrl[] = "https://api-lp1.znc.srv.nintendo.net/v4/Account/Login";
+constexpr char kWebServiceTokenUrl[] = "https://api-lp1.znc.srv.nintendo.net/v4/Game/GetWebServiceToken";
+
+std::vector<nso::Json> bodies_of(const mock::MockNintendoApi& api, const std::string& label) {
+    std::vector<nso::Json> bodies;
+    for (const auto& request : api.requests()) {
+        if (request.label == label) bodies.push_back(nso::Json::parse(request.body));
+    }
+    return bodies;
+}
+
+// /encrypt-request calls for one Coral endpoint.
+std::size_t separate_encryptions_of(const mock::MockNintendoApi& api, const std::string& url) {
+    std::size_t count = 0;
+    for (const auto& body : bodies_of(api, "nxapi:encrypt-request")) {
+        if (body.string("url") == url) ++count;
+    }
+    return count;
+}
+
 // ---------------------------------------------------------------- fast tests
 
 void https_requests_reach_the_mock() {
@@ -126,8 +146,62 @@ void presence_polls_reuse_every_token() {
     require(h.api.count("nxapi:f(method 1)") == 1, "One Coral login attestation");
     require(h.api.count("coral:Account/Login") == 1, "One Coral login for three polls");
     require(h.api.count("coral:User/ShowSelf") == 3, "One ShowSelf per poll");
-    require(h.api.count("nxapi:encrypt-request") == 4 && h.api.count("nxapi:decrypt-response") == 4,
-        "Only the login and each poll are encrypted and decrypted");
+    require(h.api.count("nxapi:encrypt-request") == 3 && h.api.count("nxapi:decrypt-response") == 4,
+        "The login is encrypted by its /f request, so only the polls use /encrypt-request (saw " +
+        std::to_string(h.api.count("nxapi:encrypt-request")) + ")");
+}
+
+void coral_login_is_encrypted_by_its_f_request() {
+    mock::Options options;
+    options.na_id = "na-one-call-login";
+    Harness h(options);
+    h.coral.self_presence(h.session_token);
+    require_compliant(h.api, "One-call login");
+    const auto attestations = bodies_of(h.api, "nxapi:f(method 1)");
+    require(attestations.size() == 1, "One Coral login attestation");
+    const auto* encrypt = attestations[0].find("encrypt_token_request");
+    require(encrypt != nullptr && encrypt->is_object(), "The login's /f request asks nxapi to encrypt the login");
+    require(encrypt->string("url") == kCoralLoginUrl, "It names Account/Login");
+    const auto* parameter = encrypt->find("parameter");
+    require(parameter != nullptr && parameter->is_object(), "It carries the login parameter");
+    require(parameter->string("naIdToken") == attestations[0].string("token"),
+        "The login carries the id_token that /f signs");
+    require(parameter->string("language") == "en-US", "The login carries the account's language");
+    require(separate_encryptions_of(h.api, kCoralLoginUrl) == 0, "The login isn't encrypted again by /encrypt-request");
+    require(h.api.count("coral:Account/Login") == 1, "One Coral login");
+}
+
+void web_service_token_is_encrypted_by_its_f_request() {
+    mock::Options options;
+    options.na_id = "na-one-call-web-service";
+    Harness h(options);
+    require(!h.coral.get_web_service_token(h.session_token, 4834290508791808ULL).empty(), "Web service token");
+    require_compliant(h.api, "One-call web service token");
+    const auto attestations = bodies_of(h.api, "nxapi:f(method 2)");
+    require(attestations.size() == 1, "One web service attestation");
+    const auto* encrypt = attestations[0].find("encrypt_token_request");
+    require(encrypt != nullptr && encrypt->is_object(), "The /f request asks nxapi to encrypt GetWebServiceToken");
+    require(encrypt->string("url") == kWebServiceTokenUrl, "It names Game/GetWebServiceToken");
+    const auto* parameter = encrypt->find("parameter");
+    require(parameter != nullptr && parameter->is_object() && parameter->integer("id") == 4834290508791808LL,
+        "It asks for the requested game service");
+    require(parameter->find("registrationToken") != nullptr && parameter->string("registrationToken").empty(),
+        "It sends an empty registration token, like the app");
+    require(separate_encryptions_of(h.api, kWebServiceTokenUrl) == 0,
+        "GetWebServiceToken isn't encrypted again by /encrypt-request");
+}
+
+void sign_in_falls_back_when_f_does_not_encrypt() {
+    mock::Options options;
+    options.na_id = "na-two-call";
+    options.one_call_encryption = false;
+    Harness h(options);
+    h.coral.self_presence(h.session_token);
+    require(!h.coral.get_web_service_token(h.session_token, 4834290508791808ULL).empty(), "Web service token");
+    require_compliant(h.api, "nxapi without one-call encryption");
+    require(separate_encryptions_of(h.api, kCoralLoginUrl) == 1 &&
+        separate_encryptions_of(h.api, kWebServiceTokenUrl) == 1,
+        "The login and token request fall back to /encrypt-request");
 }
 
 void nxapi_requests_carry_required_headers() {
@@ -721,6 +795,9 @@ int main(int argc, char** argv) {
                 {"https requests reach the mock", https_requests_reach_the_mock},
                 {"test credentials stay out of the real store", test_credentials_stay_out_of_the_real_store},
                 {"presence polls reuse every token", presence_polls_reuse_every_token},
+                {"Coral login is encrypted by its /f request", coral_login_is_encrypted_by_its_f_request},
+                {"web service token is encrypted by its /f request", web_service_token_is_encrypted_by_its_f_request},
+                {"sign-in falls back when /f doesn't encrypt", sign_in_falls_back_when_f_does_not_encrypt},
                 {"nxapi requests carry required headers", nxapi_requests_carry_required_headers},
                 {"nxapi never runs two requests at once", nxapi_never_runs_two_requests_at_once},
                 {"nxapi Retry-After is honoured", nxapi_retry_after_is_honoured},

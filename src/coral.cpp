@@ -38,7 +38,8 @@ FAttestation nxapi_generate_f_limited(
     int hash_method,
     const std::string& token,
     const std::string& na_id,
-    const std::string& coral_user_id) {
+    const std::string& coral_user_id,
+    const EncryptTokenRequest* encrypt = nullptr) {
     const auto now = std::chrono::system_clock::now();
     const auto fallback_key = base64url(sha256(token));
 
@@ -73,7 +74,23 @@ FAttestation nxapi_generate_f_limited(
         }
     }
 
-    return nxapi.generate_f(hash_method, token, na_id, coral_user_id);
+    return nxapi.generate_f(hash_method, token, na_id, coral_user_id, encrypt);
+}
+
+// The encrypted Coral request: as /f returned it, or, if nxapi didn't
+// encrypt it there, signed with the f and encrypted by /encrypt-request.
+std::vector<unsigned char> encrypted_request_body(
+    NxapiClient& nxapi,
+    const FAttestation& attestation,
+    const EncryptTokenRequest& request,
+    const std::string& coral_token) {
+    if (!attestation.encrypted_request.empty()) return attestation.encrypted_request;
+    auto parameter = request.parameter.as_object();
+    parameter["f"] = attestation.f;
+    parameter["requestId"] = attestation.request_id;
+    parameter["timestamp"] = static_cast<double>(attestation.timestamp);
+    const Json body(Json::object{{"parameter", Json(std::move(parameter))}});
+    return nxapi.encrypt_request(request.url, coral_token, body.dump());
 }
 
 std::string upper(std::string text) {
@@ -350,23 +367,27 @@ std::string CoralClient::ensure_session(const std::string& session_token) {
     const auto nintendo_tokens = auth_.exchange_session_token(session_token);
     const auto profile = auth_.fetch_profile(nintendo_tokens.access_token);
 
+    // /f signs the login and returns it encrypted, filling in f, requestId
+    // and timestamp, so signing in needs no /encrypt-request call.
+    const EncryptTokenRequest login_request{
+        coral_url(kLoginPath),
+        Json(Json::object{
+            {"naIdToken", nintendo_tokens.id_token},
+            {"language", profile.language},
+            {"f", ""},
+            {"requestId", ""},
+            {"timestamp", 0},
+        }),
+    };
     const auto attestation = nxapi_generate_f_limited(
-        nxapi_, 1, nintendo_tokens.id_token, profile.id, "");
+        nxapi_, 1, nintendo_tokens.id_token, profile.id, "", &login_request);
 
     const auto nso_version = nxapi_.nso_version();
     const auto perform_login_request =
         [&](const FAttestation& candidate)
             -> std::pair<HttpResponse, std::string> {
-        const Json parameter(Json::object{
-            {"naIdToken", nintendo_tokens.id_token},
-            {"language", profile.language},
-            {"f", candidate.f},
-            {"requestId", candidate.request_id},
-            {"timestamp", static_cast<double>(candidate.timestamp)},
-        });
-        const Json request_body(Json::object{{"parameter", parameter}});
-        const auto encrypted_login = nxapi_.encrypt_request(
-            coral_url(kLoginPath), "", request_body.dump());
+        const auto encrypted_login =
+            encrypted_request_body(nxapi_, candidate, login_request, "");
 
         auto response = http_.post_bytes(
             coral_url(kLoginPath),
@@ -604,25 +625,26 @@ std::string CoralClient::get_web_service_token(
 
         std::lock_guard request_lock(request_mutex_);
 
+        // As at sign-in, /f signs and encrypts the request in one call.
+        const EncryptTokenRequest token_request{
+            coral_url("/v4/Game/GetWebServiceToken"),
+            Json(Json::object{
+                {"id", static_cast<double>(target_service_id)},
+                {"registrationToken", ""},
+                {"f", ""},
+                {"requestId", ""},
+                {"timestamp", 0},
+            }),
+        };
         const auto attestation = nxapi_generate_f_limited(
-            nxapi_, 2, access_token, na_id, coral_user_id);
+            nxapi_, 2, access_token, na_id, coral_user_id, &token_request);
 
         const auto nso_version = nxapi_.nso_version();
         const auto perform_web_service_token_request =
             [&](const FAttestation& candidate)
                 -> std::pair<HttpResponse, std::string> {
-            const Json parameter(Json::object{
-                {"id", static_cast<double>(target_service_id)},
-                {"registrationToken", ""},
-                {"f", candidate.f},
-                {"requestId", candidate.request_id},
-                {"timestamp", static_cast<double>(candidate.timestamp)},
-            });
-            const Json request_body(Json::object{{"parameter", parameter}});
-            const auto encrypted_request = nxapi_.encrypt_request(
-                coral_url("/v4/Game/GetWebServiceToken"),
-                access_token,
-                request_body.dump());
+            const auto encrypted_request = encrypted_request_body(
+                nxapi_, candidate, token_request, access_token);
 
             auto response = http_.post_bytes(
                 coral_url("/v4/Game/GetWebServiceToken"),

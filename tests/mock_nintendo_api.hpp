@@ -18,9 +18,12 @@
 //   * /f: 10 method-1 requests / 60 min per Nintendo Account,
 //         20 method-2 requests / 30 min per Coral user
 //   * /f without the deprecated timestamp / request_id fields
+//   * /f encrypt_token_request for the Coral endpoint matching the hash
+//     method, with f / requestId / timestamp left as "" / 0 for nxapi to fill
 //
 // and Nintendo's own services: Nintendo and Coral tokens cached for their
-// lifetime, no retries after an HTTP response, each capture downloaded once.
+// lifetime, Account/Login and GetWebServiceToken signed with an f from nxapi,
+// no retries after an HTTP response, each capture downloaded once.
 // A breach is recorded as a violation; rate-limit breaches are also refused
 // with 429, as the real API does.
 
@@ -94,6 +97,8 @@ struct Options {
     int coral_token_ttl = 7200;
     int nxapi_latency_ms = 0;      // widens the window for concurrency checks
     std::string expected_client_version = NSO_ZNCA_CLIENT_VERSION;
+    // false: /f ignores encrypt_token_request, like a server without it.
+    bool one_call_encryption = true;
 };
 
 class MockNintendoApi {
@@ -326,7 +331,13 @@ private:
             response = respond(request);
             request.status = response.status;
             request.duration_ms = std::chrono::duration<double, std::milli>(Clock::now() - received).count();
-            if (response.status / 100 != 2) last_error_[request.host + request.path + request.body] = now();
+            if (response.status / 100 != 2) {
+                ErrorRecord error{now(), 0};
+                for (const auto& line : response.headers) {
+                    if (line.rfind("Retry-After: ", 0) == 0) error.retry_after_until = now() + std::stod(line.substr(13));
+                }
+                last_error_[request.host + request.path + request.body] = error;
+            }
             requests_.push_back(request);
         }
         if (nxapi) --nxapi_in_flight_;
@@ -340,14 +351,15 @@ private:
     }
 
     // Repeating an identical request soon after an error response is an
-    // automatic retry, which neither nxapi nor Nintendo services allow.
+    // automatic retry, which neither nxapi nor Nintendo services allow. The
+    // terms make one exception: repeating once the error's Retry-After ends.
     void check_retry(const Request& request) {
         const auto key = request.host + request.path + request.body;
         const auto found = last_error_.find(key);
-        if (found != last_error_.end() && now() - found->second < 10.0) {
-            violation("No automatic retries", request.label + " repeated " +
-                std::to_string(now() - found->second).substr(0, 4) + "s after an error response");
-        }
+        if (found == last_error_.end() || now() - found->second.at >= 10.0) return;
+        if (found->second.retry_after_until > 0 && now() >= found->second.retry_after_until) return;
+        violation("No automatic retries", request.label + " repeated " +
+            std::to_string(now() - found->second.at).substr(0, 4) + "s after an error response");
     }
 
     Response respond(const Request& request) {
@@ -472,11 +484,41 @@ private:
         return {404, "application/json", "{}", {}};
     }
 
+    // docs/api.md: encrypt_token_request names the Coral request /f signs.
+    // Its f, requestId and timestamp must be "" / 0; nxapi fills them in.
+    static std::string encrypt_token_request_problem(const std::string& method, const nso::Json& request) {
+        if (!request.is_object()) return "is not an object";
+        const auto url = request.string("url");
+        const auto coral = std::string("https://") + kCoral;
+        const bool expected = method == "1"
+            ? url == coral + "/v4/Account/Login" || url == coral + "/v4/Account/GetToken"
+            : url == coral + "/v4/Game/GetWebServiceToken";
+        if (!expected) return "has url '" + url + "'";
+        const auto* parameter = request.find("parameter");
+        if (parameter == nullptr || !parameter->is_object()) return "has no parameter";
+        const auto* f = parameter->find("f");
+        const auto* request_id = parameter->find("requestId");
+        const auto* timestamp = parameter->find("timestamp");
+        if (f == nullptr || !f->is_string() || !f->as_string().empty() ||
+            request_id == nullptr || !request_id->is_string() || !request_id->as_string().empty() ||
+            timestamp == nullptr || !timestamp->is_number() || timestamp->as_number() != 0) {
+            return "parameter needs f and requestId set to \"\" and timestamp set to 0";
+        }
+        return {};
+    }
+
     Response generate_f(const Request&, const nso::Json& json) {
         if (json.find("timestamp") || json.find("request_id")) {
             violation("nxapi: no timestamp/request_id", "/f sent fields removed in nxapi 2.12.0");
         }
         const auto method = json.string("hash_method");
+        const auto* encrypt = options_.one_call_encryption ? json.find("encrypt_token_request") : nullptr;
+        if (encrypt != nullptr) {
+            if (const auto problem = encrypt_token_request_problem(method, *encrypt); !problem.empty()) {
+                violation("nxapi: encrypt_token_request", "/f method " + method + " encrypt_token_request " + problem);
+                return {400, "application/json", R"({"error":"invalid_request"})", {}};
+            }
+        }
         const bool coral_auth = method == "1";
         const auto key = coral_auth ? json.string("na_id") : json.string("coral_user_id");
         const double window = coral_auth ? 3600 : 1800;
@@ -490,16 +532,49 @@ private:
             return {429, "application/json", R"({"error":"rate_limit"})", {"Retry-After: 600"}};
         }
         history.push_back(now());
-        return {200, "application/json", nso::Json(nso::Json::object{
-            {"f", "mock-f-" + std::to_string(++serial_)},
-            {"request_id", "req-" + std::to_string(serial_)},
-            {"timestamp", static_cast<std::int64_t>(1762944000000LL + serial_)},
-        }).dump(), {}};
+        const auto f = "mock-f-" + std::to_string(++serial_);
+        const auto request_id = "req-" + std::to_string(serial_);
+        const auto timestamp = static_cast<std::int64_t>(1762944000000LL + serial_);
+        issued_f_[f] = {request_id, timestamp};
+        nso::Json::object reply{{"f", f}, {"request_id", request_id}, {"timestamp", timestamp}};
+        if (encrypt != nullptr) {
+            auto parameter = encrypt->at("parameter").as_object();
+            parameter["f"] = f;
+            parameter["requestId"] = request_id;
+            parameter["timestamp"] = timestamp;
+            // The mock's encryption is plain base64, as in /encrypt-request.
+            const auto body = nso::Json(nso::Json::object{{"parameter", nso::Json(std::move(parameter))}}).dump();
+            reply["encrypted_token_request"] = nso::base64_encode(std::vector<unsigned char>(body.begin(), body.end()));
+        }
+        return {200, "application/json", nso::Json(std::move(reply)).dump(), {}};
+    }
+
+    // Coral only accepts a sign-in whose parameter carries an f nxapi issued,
+    // with that f's requestId and timestamp. Mock encryption is plain, so the
+    // request body is the JSON itself.
+    bool signed_by_nxapi(const Request& request) const {
+        try {
+            const auto body = nso::Json::parse(request.body);
+            const auto* parameter = body.find("parameter");
+            if (parameter == nullptr || !parameter->is_object()) return false;
+            const auto found = issued_f_.find(parameter->string("f"));
+            return found != issued_f_.end() &&
+                parameter->string("requestId") == found->second.request_id &&
+                parameter->integer("timestamp") == found->second.timestamp;
+        } catch (...) {
+            return false;
+        }
+    }
+
+    Response unsigned_coral_request(const Request& request) {
+        violation("Coral: f from nxapi", request.label + " was not signed with an f from nxapi");
+        return {200, "application/octet-stream", R"({"status":9403,"errorMessage":"Invalid token."})", {}};
     }
 
     Response coral(const Request& request) {
         const auto& path = request.path;
         if (path == "/v4/Account/Login") {
+            if (!signed_by_nxapi(request)) return unsigned_coral_request(request);
             if (any_valid(coral_tokens_, 60.0)) {
                 violation("Coral: cache access token", "Account/Login while a Coral token was still valid");
             }
@@ -533,6 +608,7 @@ private:
             }).dump(), {}};
         }
         if (path == "/v4/Game/GetWebServiceToken") {
+            if (!signed_by_nxapi(request)) return unsigned_coral_request(request);
             return {200, "application/octet-stream", nso::Json(nso::Json::object{
                 {"status", 0},
                 {"result", nso::Json(nso::Json::object{
@@ -593,7 +669,11 @@ private:
     std::vector<Request> requests_;
     std::vector<Violation> violations_;
     std::vector<Fault> faults_;
-    std::map<std::string, double> last_error_;
+    struct ErrorRecord {
+        double at = 0;
+        double retry_after_until = 0;  // 0: the error had no Retry-After
+    };
+    std::map<std::string, ErrorRecord> last_error_;
     std::atomic<int> nxapi_in_flight_{0};
     std::atomic<int> max_nxapi_in_flight_{0};
     double nxapi_retry_after_until_ = 0;
@@ -605,6 +685,11 @@ private:
     std::map<std::string, Token> coral_tokens_;
     std::map<std::string, int> nxapi_grants_;
     std::map<std::string, std::deque<double>> f_history_;
+    struct IssuedF {
+        std::string request_id;
+        std::int64_t timestamp = 0;
+    };
+    std::map<std::string, IssuedF> issued_f_;
     std::set<std::string> downloaded_;
     std::vector<MediaFixture> media_;
     bool playing_ = true;

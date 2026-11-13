@@ -1,6 +1,7 @@
 #pragma once
 
 #include "nso_album_sync/http.hpp"
+#include "nso_album_sync/json.hpp"
 #include "nso_album_sync/nintendo_auth.hpp"
 
 #include <atomic>
@@ -17,6 +18,17 @@ struct FAttestation {
     std::string f;
     std::string request_id;
     std::int64_t timestamp = 0;
+    // The Coral request, signed and encrypted by nxapi, when /f was given an
+    // EncryptTokenRequest.
+    std::vector<unsigned char> encrypted_request;
+};
+
+// A Coral request (Account/Login or Game/GetWebServiceToken) for /f to sign
+// and encrypt in the same call, as nxapi's own client does. The parameter
+// leaves f and requestId as "" and timestamp as 0 for nxapi to fill in.
+struct EncryptTokenRequest {
+    std::string url;
+    Json parameter;
 };
 
 class NxapiClient {
@@ -32,7 +44,8 @@ public:
         int hash_method,
         const std::string& token,
         const std::string& na_id,
-        const std::string& coral_user_id);
+        const std::string& coral_user_id,
+        const EncryptTokenRequest* encrypt = nullptr);
 
     std::vector<unsigned char> encrypt_request(
         const std::string& url,

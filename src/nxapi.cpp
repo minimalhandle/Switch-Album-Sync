@@ -356,7 +356,8 @@ FAttestation NxapiClient::generate_f(
     int hash_method,
     const std::string& token,
     const std::string& na_id,
-    const std::string& coral_user_id) {
+    const std::string& coral_user_id,
+    const EncryptTokenRequest* encrypt) {
     const auto version = nso_version();
     // The /f API accepts coral_user_id only for hash method 2.
     // Passing an empty coral_user_id for method 1 fails request validation.
@@ -367,6 +368,12 @@ FAttestation NxapiClient::generate_f(
     };
     if (hash_method == 2 && !coral_user_id.empty()) {
         fields.emplace("coral_user_id", coral_user_id);
+    }
+    if (encrypt != nullptr) {
+        fields.emplace("encrypt_token_request", Json(Json::object{
+            {"url", encrypt->url},
+            {"parameter", encrypt->parameter},
+        }));
     }
     const Json payload(std::move(fields));
 
@@ -380,7 +387,16 @@ FAttestation NxapiClient::generate_f(
     attestation.f = json.string("f");
     attestation.request_id = json.string("request_id");
     attestation.timestamp = json.integer("timestamp");
-    if (attestation.f.empty() || attestation.request_id.empty() || attestation.timestamp == 0) {
+    if (const auto encrypted = json.string("encrypted_token_request");
+        encrypt != nullptr && !encrypted.empty()) {
+        attestation.encrypted_request = base64_decode(encrypted);
+        if (attestation.encrypted_request.empty()) {
+            throw std::runtime_error("nxapi /f returned an unreadable encrypted request");
+        }
+    }
+    // The f values are only needed when nxapi didn't encrypt the request.
+    if (attestation.encrypted_request.empty() &&
+        (attestation.f.empty() || attestation.request_id.empty() || attestation.timestamp == 0)) {
         throw std::runtime_error("nxapi /f returned incomplete attestation");
     }
     return attestation;
