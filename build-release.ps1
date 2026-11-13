@@ -26,11 +26,12 @@ public static class SwitchAlbumSyncRelease {
 $releaseClientId = 'aUCnVoLRU9sTIfyIjW7Yog'
 $developmentClientId = '9F_ul8eygxiLn9N0uCaPeA'
 # X-znca-Client-Version (fixed, never set at runtime). nxapi rejects 3.0.x for
-# current Nintendo Switch Online versions. Both builds send the compatibility
-# version for Nintendo Switch Online 3.6.0, announced by nxapi
-# Switch to per-client values if nxapi-auth issues them.
-$testZncaClientVersion = '2k7EnRvh__pWRtnN'
-$releaseZncaClientVersion = '2k7EnRvh__pWRtnN'
+# current Nintendo Switch Online versions. Both builds send d8fAZDPzwimzQ7c6,
+# the value the public API accepts for Nintendo Switch Online 3.6.0. The newer
+# 2k7EnRvh__pWRtnN announced by nxapi is rejected as invalid there (checked
+# 2026-11-13). Switch to per-client values if nxapi-auth issues them.
+$testZncaClientVersion = 'd8fAZDPzwimzQ7c6'
+$releaseZncaClientVersion = 'd8fAZDPzwimzQ7c6'
 
 $root = $PSScriptRoot
 $cmake = Join-Path $root 'build\cmake\bin\cmake.exe'

@@ -64,11 +64,23 @@ void replace_cache_file(
 
 // nxapi explains failures with an error code such as incompatible_client.
 // Only the code is kept: it identifies the problem and contains no user data.
+// The error code plus nxapi's short developer description (such as "Invalid
+// X-znca-Client-Version header"), which Copy diagnostics shows. invalid_request
+// alone can't tell a bad header from a bad body.
 std::string error_code(const HttpResponse& response) {
     try {
-        const auto code = Json::parse(response.text()).string("error");
-        if (!code.empty() && code.size() <= 64 &&
-            code.find_first_not_of("abcdefghijklmnopqrstuvwxyz_") == std::string::npos) return ", " + code;
+        const auto json = Json::parse(response.text());
+        const auto code = json.string("error");
+        if (code.empty() || code.size() > 64 ||
+            code.find_first_not_of("abcdefghijklmnopqrstuvwxyz_") != std::string::npos) return {};
+        std::string result = ", " + code;
+        std::string description;
+        for (const char character : json.string("error_description")) {
+            if (description.size() >= 100) break;
+            if (character >= 0x20 && character < 0x7f) description += character;
+        }
+        if (!description.empty()) result += ": " + description;
+        return result;
     } catch (...) {
     }
     return {};

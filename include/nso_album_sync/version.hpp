@@ -13,7 +13,7 @@
 #endif
 
 #ifndef NSO_ZNCA_CLIENT_VERSION
-#define NSO_ZNCA_CLIENT_VERSION "2k7EnRvh__pWRtnN"
+#define NSO_ZNCA_CLIENT_VERSION "d8fAZDPzwimzQ7c6"
 #endif
 
 #define NSO_PROJECT_URL "https://github.com/minimalhandle/Switch-Album-Sync"
