@@ -111,6 +111,6 @@ Switch Album Sync started as a fork of [NSO Album Sync](https://github.com/Dycoo
 
 - [Diogo Enes (Dycool)](https://github.com/Dycool) for creating NSO Album Sync.
 - [Bentheminernz](https://github.com/Bentheminernz) for the Zelda Notes Rich Presence reference work.
-- [samuelthomas2774](https://github.com/samuelthomas2774) and the nxapi project for nxapi-znca-api and nxapi-auth.
+- The [nxapi project](https://gitlab.fancy.org.uk/samuel/nxapi) for nxapi-znca-api and nxapi-auth.
 
 Released under the [MIT licence](LICENSE). See the [third-party notices](THIRD-PARTY-NOTICES.txt) for bundled components. Nintendo Switch, Nintendo Switch Online and game names are trademarks of Nintendo; Discord is a trademark of Discord Inc.

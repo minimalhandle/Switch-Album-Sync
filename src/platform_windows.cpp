@@ -34,7 +34,9 @@ constexpr wchar_t kRunValue[] = L"Switch Album Sync";
 constexpr wchar_t kStartInTray[] = L"--start-in-tray";
 constexpr char kNxapiDisclosureTitle[] = "Third-Party Service Disclosure";
 // The nxapi terms ask clients that sign in with a user's account to link the
-// project, and allow linking its end-user help.
+// project, and allow linking its end-user help. The project's home is on
+// GitLab, but its repository there is members-only, so link the GitHub
+// mirror, where users can read its README and docs.
 constexpr char kNxapiSourceUrl[] =
     "https://github.com/samuelthomas2774/nxapi-znca-api";
 constexpr char kNxapiHelpUrl[] =
