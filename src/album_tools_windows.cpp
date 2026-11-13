@@ -224,7 +224,7 @@ bool cleanup_tool(HWND owner, const MenuState& state) {
     }
     const auto chosen = ask_which(owner, L"Storage cleanup", L"Free up space",
         L"Your album uses " + size_text(total) + L". These are its largest captures. Select any you no longer need; "
-        L"they'll go to the Recycle Bin. Album tools → Find duplicates finds extra copies.",
+        L"they'll go to the Recycle Bin. More → Find duplicates finds extra copies.",
         choices, {}, L"Move to Recycle Bin");
     std::vector<Path> files;
     for (const int index : chosen) files.push_back(largest.at(static_cast<std::size_t>(index))->path);

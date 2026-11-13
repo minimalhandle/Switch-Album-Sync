@@ -64,7 +64,7 @@ constexpr char kDiscordDisclosureBody[] =
     "• details for games you've enabled: Splatoon rank and weapon, Animal Crossing "
     "island and resident, Zelda Notes location\n\n"
     "Discord shows this to people who can see your activity and loads the images "
-    "from Nintendo and splatoon3.ink. Game details come from Nintendo's game "
+    "from Nintendo, splatoon3.ink and Zelda Wiki. Game details come from Nintendo's game "
     "services, reached through nxapi like other Nintendo Switch Online requests.";
 constexpr char kDiscordTurnOnQuestion[] = "\n\nTurn on Rich Presence?";
 constexpr char kDiscordKeepOnQuestion[] = "\n\nRich Presence is already on. Keep it on?";

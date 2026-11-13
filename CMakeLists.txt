@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(
     SwitchAlbumSync
-    VERSION 1.1.0
+    VERSION 1.0.0
     LANGUAGES CXX
 )
 
@@ -45,9 +45,8 @@ set(
 # Sent as X-znca-Client-Version; must be fixed, never set at runtime. nxapi now
 # rejects 3.0.x values for current Nintendo Switch Online versions
 # (incompatible_client), and nxapi-auth doesn't yet issue per-client values.
-# Development and test builds use the compatibility value nxapi's own client
+# Until it does, builds use the compatibility value nxapi's own client
 # publishes (ZNCA_API_COMPATIBILITY_VERSION in nxapi src/api/coral.ts).
-# Release builds must use a value nxapi has confirmed for the release client.
 set(
     NSO_ZNCA_CLIENT_VERSION
     "d8fAZDPzwimzQ7c6"
